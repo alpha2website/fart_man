@@ -14,6 +14,7 @@ interface MainMenuProps {
   onPlay: () => void;
   onCustomizeFace: () => void;
   onToggleMute: () => void;
+  onMultiplayer: () => void;
   selectedSkin: SkinDef;
   onSkinChange: (skin: SkinDef) => void;
 }
@@ -25,6 +26,7 @@ export default function MainMenu({
   onPlay,
   onCustomizeFace,
   onToggleMute,
+  onMultiplayer,
   selectedSkin,
   onSkinChange,
 }: MainMenuProps) {
@@ -174,6 +176,19 @@ export default function MainMenu({
           }}
         >
           💨 PLAY NOW!
+        </button>
+
+        {/* FIGHT WITH A FRIEND — Multiplayer */}
+        <button
+          onClick={onMultiplayer}
+          className="w-full py-3.5 rounded-2xl font-black text-base transition-all active:scale-95"
+          style={{
+            background: 'linear-gradient(135deg, #EF4444, #DC2626)',
+            color: '#fff',
+            boxShadow: '0 4px 0 #991B1B, 0 0 16px rgba(239,68,68,0.3)',
+          }}
+        >
+          ⚔️ FIGHT WITH A FRIEND!
         </button>
 
         {/* SKIN SELECTOR */}

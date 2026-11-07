@@ -8,6 +8,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { GameEngine, EngineState } from '@/components/game/GameEngine';
 import { AudioManager } from '@/components/game/AudioManager';
+import { PeerConnection } from '@/lib/peerConnection';
 import { PlayerCountTracker } from '@/lib/playerCount';
 import { SKINS, SkinDef } from '@/lib/gameConfig';
 
@@ -17,13 +18,16 @@ const GameHUD       = dynamic(() => import('@/components/ui/GameHUD'),         {
 const PauseScreen   = dynamic(() => import('@/components/ui/PauseScreen'),     { ssr: false });
 const GameOverScreen = dynamic(() => import('@/components/ui/GameOver'),       { ssr: false });
 const FaceUploader  = dynamic(() => import('@/components/face/FaceUploader'),  { ssr: false });
+const MultiplayerLobby = dynamic(() => import('@/components/multiplayer/MultiplayerLobby'), { ssr: false });
+const MultiplayerGame  = dynamic(() => import('@/components/multiplayer/MultiplayerGame'),  { ssr: false });
 
-type Screen = 'menu' | 'game' | 'gameover';
+type Screen = 'menu' | 'game' | 'gameover' | 'multiplayer-lobby' | 'multiplayer-game';
 
 export default function FartManGame() {
   const engineRef     = useRef<GameEngine | null>(null);
   const audioRef      = useRef<AudioManager | null>(null);
-  const trackerRef    = useRef<PlayerCountTracker | null>(null);
+  const trackerRef    = useRef<any>(null);
+  const connRef       = useRef<PeerConnection | null>(null);
 
   const [screen,        setScreen]        = useState<Screen>('menu');
   const [gameState,     setGameState]     = useState<EngineState>('idle');
@@ -39,16 +43,18 @@ export default function FartManGame() {
   const [finalScore,    setFinalScore]    = useState(0);
   const [playerCount,   setPlayerCount]   = useState(1);
 
+  // Helper: get face data URL for networking
+  const getFaceDataUrl = useCallback(() => {
+    if (faceImage?.src && faceImage.src.startsWith('data:')) return faceImage.src;
+    return null;
+  }, [faceImage]);
+
   // ---- Live player count ----
   useEffect(() => {
     const tracker = new PlayerCountTracker();
     trackerRef.current = tracker;
-    const unsub = tracker.subscribe((n) => setPlayerCount(n));
-    return () => {
-      unsub();
-      tracker.destroy();
-      trackerRef.current = null;
-    };
+    const unsub = tracker.subscribe((n: number) => setPlayerCount(n));
+    return () => { unsub(); tracker.destroy(); };
   }, []);
 
   // ---- Menu audio ----
@@ -65,6 +71,21 @@ export default function FartManGame() {
     setGasMeter(0);
     setBoostActive(false);
     setTimeout(() => engineRef.current?.start(), 120);
+  }, []);
+
+  const handleMultiplayer = useCallback(() => {
+    setScreen('multiplayer-lobby');
+  }, []);
+
+  const handleMatchStart = useCallback(() => {
+    setScreen('multiplayer-game');
+  }, []);
+
+  const handleMultiplayerExit = useCallback(() => {
+    connRef.current?.destroy();
+    connRef.current = null;
+    setScreen('menu');
+    audioRef.current?.playMenu();
   }, []);
 
   const handleStateChange = useCallback((s: EngineState) => setGameState(s), []);
@@ -201,10 +222,32 @@ export default function FartManGame() {
             onPlay={handlePlay}
             onCustomizeFace={() => setShowFaceUploader(true)}
             onToggleMute={handleToggleMute}
+            onMultiplayer={handleMultiplayer}
             selectedSkin={selectedSkin}
             onSkinChange={handleSkinChange}
           />
         </div>
+      )}
+
+      {/* Multiplayer Lobby */}
+      {screen === 'multiplayer-lobby' && (
+        <MultiplayerLobby
+          connRef={connRef}
+          skin={selectedSkin}
+          faceDataUrl={getFaceDataUrl()}
+          playerName={`Player${Math.floor(Math.random() * 1000)}`}
+          onMatchStart={handleMatchStart}
+          onBack={handleMultiplayerExit}
+        />
+      )}
+
+      {/* Multiplayer Arena Game */}
+      {screen === 'multiplayer-game' && (
+        <MultiplayerGame
+          connRef={connRef}
+          audioRef={audioRef}
+          onExit={handleMultiplayerExit}
+        />
       )}
 
       {/* Face Uploader modal */}
