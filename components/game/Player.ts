@@ -153,12 +153,13 @@ export class Player {
     ctx.textBaseline = 'middle';
     ctx.fillText('💨', 0, 6);
 
-    // Head
+    // Head — enlarged to fit bigger custom faces
     const headInflate = this.cheekyInflate * 3;
     const hBase = -H / 4 - 4;
+    const headR = this.faceImage ? 28 : 22;   // bigger head when custom face is active
     ctx.fillStyle = skin.bodyColor;
     ctx.beginPath();
-    ctx.ellipse(0, hBase + headInflate * 0.5, 22 + headInflate, 22 + headInflate, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, hBase + headInflate * 0.5, headR + headInflate, headR + headInflate, 0, 0, Math.PI * 2);
     ctx.fill();
 
     // Arms — swing when running
@@ -198,24 +199,40 @@ export class Player {
   private _drawFace(ctx: CanvasRenderingContext2D, skin: SkinDef): void {
     const H     = GAME_CONFIG.PLAYER_HEIGHT;
     const hBase = -H / 4 - 4;
-    const faceR = 19;
+    // Bigger face circle so uploaded photos are clearly visible (especially on mobile)
+    const faceR = 26;
 
     if (this.faceImage && this.faceImage.complete && this.faceImage.naturalWidth > 0) {
-      // ---- Custom uploaded face ----
+      // ---- Custom uploaded face — large and clearly visible ----
       ctx.save();
       ctx.beginPath();
       ctx.arc(0, hBase, faceR, 0, Math.PI * 2);
       ctx.clip();
-      // Draw centred inside the circular clipping area
+      // Draw the uploaded face filling the entire circle, centred
       ctx.drawImage(
         this.faceImage,
-        -faceR,           // dest x
-        hBase - faceR,    // dest y
-        faceR * 2,        // dest width
-        faceR * 2         // dest height
+        -faceR,            // dest x — centred
+        hBase - faceR,     // dest y — centred on head
+        faceR * 2,         // dest width
+        faceR * 2          // dest height
       );
       ctx.restore();
-      // Always draw mask on top of custom face too
+
+      // Draw a thin border ring around the face so it blends with the cartoon
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, hBase, faceR, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Highlight on top-left for a cartoon look
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.beginPath();
+      ctx.ellipse(-faceR * 0.35, hBase - faceR * 0.35, faceR * 0.4, faceR * 0.25, -0.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw the mask band across the eyes area on top of the photo
+      this._drawMask(ctx);
       return;
     }
 

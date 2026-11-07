@@ -53,63 +53,79 @@ export class AudioManager {
   }
 
   /**
-   * Synthesise a funny fart sound using noise + filter + envelope.
+   * Synthesise a funny, clearly audible fart sound.
+   * Uses a low rumble + buzzing reed + noise burst for a cartoon "BRAAAP".
    * Cycles through 5 variants each call.
    */
   playFartSFX(): void {
     if (this.muted) return;
     const ctx = this.getAudioCtx();
     if (!ctx) return;
-    if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); return; }
+    if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
 
     this.fartVariant = (this.fartVariant + 1) % 5;
     const v = this.fartVariant;
+    const now = ctx.currentTime;
 
-    // Noise buffer (0.4 – 0.9 seconds)
-    const duration = 0.35 + v * 0.08;
+    // Duration: 0.4 – 0.7s
+    const duration = 0.4 + v * 0.06;
+
+    // ── 1. Low rumble oscillator (the "BR" in BRAAP) ──
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    const rumbleFreq = 50 + v * 15;  // 50–110 Hz
+    osc.frequency.setValueAtTime(rumbleFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(rumbleFreq * 0.35, now + duration);
+
+    // Sub-oscillator for extra body
+    const osc2 = ctx.createOscillator();
+    osc2.type = 'square';
+    osc2.frequency.setValueAtTime(rumbleFreq * 1.5, now);
+    osc2.frequency.exponentialRampToValueAtTime(rumbleFreq * 0.5, now + duration);
+
+    // ── 2. Noise burst (the "AAP" sputter) ──
     const sampleRate = ctx.sampleRate;
-    const bufferSize = Math.floor(sampleRate * duration);
-    const buffer = ctx.createBuffer(1, bufferSize, sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = Math.random() * 2 - 1;
+    const bufSize = Math.floor(sampleRate * duration);
+    const noiseBuf = ctx.createBuffer(1, bufSize, sampleRate);
+    const noiseData = noiseBuf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) {
+      // Pulsing noise — simulates the "pffpffpff" of escaping gas
+      const pulse = Math.sin((i / sampleRate) * (40 + v * 8) * Math.PI * 2);
+      noiseData[i] = (Math.random() * 2 - 1) * (0.5 + 0.5 * pulse);
     }
+    const noise = ctx.createBufferSource();
+    noise.buffer = noiseBuf;
 
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
+    // Lowpass on noise to make it sound like a muffled fart
+    const noiseFilter = ctx.createBiquadFilter();
+    noiseFilter.type = 'lowpass';
+    noiseFilter.frequency.setValueAtTime(800 + v * 100, now);
+    noiseFilter.frequency.exponentialRampToValueAtTime(200, now + duration);
+    noiseFilter.Q.value = 1.5;
 
-    // Bandpass filter centred on a low rumble frequency
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    const baseFreq = 60 + v * 25;   // 60–160 Hz rumble
-    filter.frequency.setValueAtTime(baseFreq, ctx.currentTime);
-    filter.frequency.exponentialRampToValueAtTime(baseFreq * 0.4, ctx.currentTime + duration);
-    filter.Q.value = 0.6 + v * 0.3;
-
-    // Second high-pass for the "squeaky" top end
-    const hpf = ctx.createBiquadFilter();
-    hpf.type = 'highpass';
-    hpf.frequency.value = v % 2 === 0 ? 200 : 400;
-
-    // Amplitude envelope
+    // ── 3. Amplitude envelope — quick attack, slow decay ──
     const gain = ctx.createGain();
-    const peakGain = (0.45 + v * 0.06) * this.volume;
-    gain.gain.setValueAtTime(0, ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(peakGain, ctx.currentTime + 0.04);
-    gain.gain.setValueAtTime(peakGain, ctx.currentTime + duration * 0.5);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+    const peak = 0.85 * this.volume;   // LOUD — clearly audible over music
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(peak, now + 0.02);           // fast attack
+    gain.gain.setValueAtTime(peak, now + duration * 0.4);           // hold
+    gain.gain.linearRampToValueAtTime(peak * 0.6, now + duration * 0.7);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);  // decay
 
-    // Pitch modulation via playback rate
-    source.playbackRate.setValueAtTime(0.9 + v * 0.15, ctx.currentTime);
-    source.playbackRate.linearRampToValueAtTime(0.4 + v * 0.05, ctx.currentTime + duration);
-
-    source.connect(filter);
-    filter.connect(hpf);
-    hpf.connect(gain);
+    // ── Connect everything ──
+    osc.connect(gain);
+    osc2.connect(gain);
+    noise.connect(noiseFilter);
+    noiseFilter.connect(gain);
     gain.connect(ctx.destination);
 
-    source.start(ctx.currentTime);
-    source.stop(ctx.currentTime + duration);
+    // ── Start / stop ──
+    osc.start(now);
+    osc2.start(now);
+    noise.start(now);
+    osc.stop(now + duration);
+    osc2.stop(now + duration);
+    noise.stop(now + duration);
   }
 
   // ---- Background Music Tracks ----
@@ -124,9 +140,16 @@ export class AudioManager {
       const audio = new Audio(src);
       audio.preload = 'auto';
       audio.volume = this.volume;
-      if (name === 'gameplay') audio.loop = true;
+      // Both menu and gameplay loop continuously
+      if (name === 'menu' || name === 'gameplay') audio.loop = true;
+      // Re-apply loop on ended event as a safety net (some browsers reset it)
+      audio.addEventListener('ended', () => {
+        if (audio.loop) {
+          audio.currentTime = 0;
+          audio.play().catch(() => {});
+        }
+      });
       audio.addEventListener('error', (e) => {
-        // Only warn on genuine network/404 errors, not autoplay-policy blocks
         const err = (e.target as HTMLAudioElement).error;
         if (err && err.code !== MediaError.MEDIA_ERR_ABORTED) {
           console.warn(`[AudioManager] Could not load: ${src} (code: ${err.code})`);
@@ -150,12 +173,21 @@ export class AudioManager {
   }
 
   play(name: TrackName): void {
-    if (this.currentTrack === name && name === 'gameplay') return;
+    // Always allow restarting gameplay even if it was the current track
+    if (this.currentTrack === name && name === 'gameplay' && !this.getTrack('gameplay')?.paused) {
+      return;
+    }
     this.stopAllTracks(name);
     const audio = this.getTrack(name);
     if (!audio) return;
     audio.volume = this.muted ? 0 : this.volume;
-    if (name === 'gameover') { audio.loop = false; audio.currentTime = 0; }
+    // Ensure loop is set for gameplay and menu tracks
+    if (name === 'gameplay' || name === 'menu') {
+      audio.loop = true;
+    } else {
+      audio.loop = false;
+      audio.currentTime = 0;
+    }
     this.currentTrack = name;
     if (!this.userInteracted) { this.pendingTrack = name; return; }
     audio.play().catch(() => { this.pendingTrack = name; });
