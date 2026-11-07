@@ -35,24 +35,31 @@ export default function MultiplayerLobby({
   const [matchStarting, setMatchStarting] = useState(false);
   const [statusText, setStatusText] = useState('');
   const countdownRef = useRef<number>(0);
+  const unsubRef = useRef<(() => void) | null>(null);
 
-  // Subscribe to messages from the connection
-  useEffect(() => {
+  // Register message handler — called AFTER connection is created
+  const setupMessageHandler = useCallback(() => {
     const conn = connRef.current;
     if (!conn) return;
 
-    const unsubMsg = conn.onMessage((msg) => {
+    // Clean up previous handler
+    unsubRef.current?.();
+    unsubRef.current = null;
+
+    unsubRef.current = conn.onMessage((msg) => {
+      console.log('[Lobby] Received message:', msg.t);
       if (msg.t === 'joinAck') {
-        if (msg.yourSlot < 0) {
+        if ((msg as any).yourSlot < 0) {
           setError('Room is full (max 5 players)!');
           setMode('error');
           return;
         }
-        conn.setSlot(msg.yourSlot);
-        setPlayers(msg.players);
+        conn.setSlot((msg as any).yourSlot);
+        setPlayers((msg as any).players ?? []);
         setMode('waiting');
+        setConnecting(false);
       } else if (msg.t === 'lobbyUpdate') {
-        setPlayers(msg.players);
+        setPlayers(msg.players ?? []);
       } else if (msg.t === 'startMatch') {
         setMatchStarting(true);
         setTimeout(() => onMatchStart(), 500);
@@ -60,9 +67,12 @@ export default function MultiplayerLobby({
         // lobbyUpdate will handle the player list
       }
     });
-
-    return () => { unsubMsg(); };
   }, [connRef, onMatchStart]);
+
+  // Clean up on unmount
+  useEffect(() => {
+    return () => { unsubRef.current?.(); };
+  }, []);
 
   const handleCreate = async () => {
     setError('');
@@ -75,6 +85,8 @@ export default function MultiplayerLobby({
       setRoomCode(code);
       setMode('waiting');
       setPlayers(connRef.current.playerList);
+      // Register message handler AFTER connection is created
+      setupMessageHandler();
     } catch (e: any) {
       setError(e?.message ?? 'Failed to create room');
       setMode('error');
@@ -91,9 +103,11 @@ export default function MultiplayerLobby({
     try {
       if (!connRef.current) connRef.current = new PeerConnection();
       connRef.current.setMyInfo(playerName, skin.id, faceDataUrl);
+      // Register message handler BEFORE joining so we catch the joinAck
+      setupMessageHandler();
       await connRef.current.joinRoom(joinCode.trim().toUpperCase(), (s) => setStatusText(s));
       setRoomCode(joinCode.trim().toUpperCase());
-      // Wait for joinAck — mode will switch to 'waiting' in message handler
+      // joinAck will be received by the message handler and switch to waiting mode
     } catch (e: any) {
       setError(e?.type === 'peer-unavailable'
         ? 'Room not found. Check the code and try again.'
