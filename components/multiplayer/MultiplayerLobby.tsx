@@ -157,7 +157,12 @@ export default function MultiplayerLobby({
               </button>
             </div>
             {error && <p className="text-red-400 text-sm text-center">{error}</p>}
-            {connecting && <p className="text-yellow-400 text-sm text-center animate-pulse">Connecting…</p>}
+            {connecting && (
+              <div className="text-center space-y-2">
+                <div className="text-yellow-400 text-sm animate-pulse">🔗 Establishing connection…</div>
+                <div className="text-gray-500 text-xs">This can take a few seconds depending on your network</div>
+              </div>
+            )}
           </div>
           <div className="border-t border-gray-800 p-4">
             <button onClick={handleBack} className="w-full py-3 rounded-xl bg-gray-700 hover:bg-gray-600 text-white font-bold transition-colors">

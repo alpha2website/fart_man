@@ -21,7 +21,7 @@ async function getCroppedImg(imageSrc: string, pixelCrop: Area): Promise<HTMLIma
     const image = new Image();
     image.onload = () => {
       const canvas = document.createElement('canvas');
-      const size = 120;
+      const size = 96;  // smaller = faster network transfer for multiplayer
       canvas.width = size;
       canvas.height = size;
       const ctx = canvas.getContext('2d')!;
@@ -43,7 +43,8 @@ async function getCroppedImg(imageSrc: string, pixelCrop: Area): Promise<HTMLIma
         size,
       );
 
-      const dataUrl = canvas.toDataURL('image/png');
+      // Use JPEG at 0.8 quality — much smaller than PNG for photos
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
       const resultImg = new Image();
       resultImg.onload = () => resolve(resultImg);
       resultImg.onerror = reject;
