@@ -159,8 +159,11 @@ export default function MultiplayerLobby({
             {error && <p className="text-red-400 text-sm text-center">{error}</p>}
             {connecting && (
               <div className="text-center space-y-2">
-                <div className="text-yellow-400 text-sm animate-pulse">🔗 Establishing connection…</div>
-                <div className="text-gray-500 text-xs">This can take a few seconds depending on your network</div>
+                <div className="text-yellow-400 text-sm animate-pulse">🔗 Connecting to room…</div>
+                <div className="text-gray-500 text-xs">
+                  Connecting P2P can take up to 20 seconds on some networks.<br />
+                  Make sure the host has created the room and is still waiting.
+                </div>
               </div>
             )}
           </div>
