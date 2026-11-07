@@ -1,13 +1,13 @@
 // ============================================================
-// FART MAN — Peer-to-Peer Networking Layer
-// Uses PeerJS (WebRTC) for device-to-device multiplayer.
-// Optimized for fast connection: multiple STUN servers,
-// reliable data channel, compressed face data, timeout handling.
+// FART MAN — Multiplayer Networking (MQTT relay)
+// Uses a free public MQTT broker over WebSocket for signaling
+// and message relay. No WebRTC/ICE/TURN needed — works through
+// any firewall that allows WebSocket (basically all of them).
+// The broker does not store game data — it only relays messages
+// between connected clients in real time.
 // ============================================================
 
-import { SkinDef } from './gameConfig';
-
-// ── Types ──
+// ── Types (same API as before so other files don't change) ──
 
 export type Role = 'host' | 'client';
 
@@ -21,81 +21,33 @@ export interface PlayerNetInfo {
 }
 
 export type NetMessage =
-  // Client → Host
-  | { t: 'join'; peerId: string; name: string; skinId: string; faceDataUrl: string | null }
-  | { t: 'input'; moveX: number; moveY: number; facing: number; attack: boolean; special: boolean }
-  // Host → All Clients
-  | { t: 'joinAck'; yourSlot: number; players: PlayerNetInfo[] }
+  | { t: 'join'; peerId: string; name: string; skinId: string; faceDataUrl: string | null; sessionId: string }
+  | { t: 'joinAck'; yourSlot: number; players: PlayerNetInfo[]; sessionId: string }
   | { t: 'lobbyUpdate'; players: PlayerNetInfo[] }
   | { t: 'startMatch'; arenaW: number; arenaH: number }
-  | { t: 'state'; players: PlayerSnap[]; projectiles: ProjSnap[]; timeLeft: number; alive: number }
+  | { t: 'input'; moveX: number; moveY: number; facing: number; attack: boolean; special: boolean }
+  | { t: 'state'; players: any[]; projectiles: any[]; timeLeft: number; alive: number }
   | { t: 'eliminated'; slot: number }
   | { t: 'matchOver'; winnerSlot: number; winnerName: string }
   | { t: 'left'; slot: number };
 
 export interface PlayerSnap {
-  slot: number;
-  x: number; y: number;
-  vx: number; vy: number;
-  hp: number; maxHp: number;
-  alive: boolean;
-  facing: number;
-  name: string;
-  skinId: string;
-  faceDataUrl: string | null;
-  attackCool: number;
-  specialCool: number;
-  invuln: number;
-  hitFlash: number;
-  isHost: boolean;
+  slot: number; x: number; y: number; vx: number; vy: number;
+  hp: number; maxHp: number; alive: boolean; facing: number;
+  name: string; skinId: string; faceDataUrl: string | null;
+  attackCool: number; specialCool: number; invuln: number;
+  hitFlash: number; isHost: boolean;
 }
 
 export interface ProjSnap {
-  id: number;
-  x: number; y: number;
-  vx: number; vy: number;
-  kind: 'blast' | 'bomb' | 'dash';
-  ownerId: number;
-  life: number;
-  radius: number;
+  id: number; x: number; y: number; vx: number; vy: number;
+  kind: 'blast' | 'bomb' | 'dash'; ownerId: number; life: number; radius: number;
 }
 
 type MsgHandler = (msg: NetMessage, fromSlot?: number) => void;
 type ConnHandler = () => void;
 
-// ── ICE servers for fast NAT traversal ──
-// STUN for discovery + TURN relay as fallback for strict NATs
-
-const ICE_SERVERS = {
-  iceServers: [
-    // Google STUN servers (fast discovery)
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    // Twilio STUN
-    { urls: 'stun:global.stun.twilio.com:3478' },
-    // OpenRelay free TURN servers (Metered.ca) — relay fallback for strict NATs
-    {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-  ],
-};
-
-// ── Helper: generate a short room code ──
+// ── Helpers ──
 
 export function generateRoomCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -106,39 +58,24 @@ export function generateRoomCode(): string {
   return `FM${code}`;
 }
 
-// ── Helper: compress face image data URL to small JPEG ──
-
-export function compressFaceDataUrl(dataUrl: string): string {
-  try {
-    // Already small enough
-    if (dataUrl.length < 2000) return dataUrl;
-    // Convert to compressed JPEG via canvas
-    const canvas = document.createElement('canvas');
-    canvas.width = 64;
-    canvas.height = 64;
-    const ctx = canvas.getContext('2d')!;
-    const img = new Image();
-    img.src = dataUrl;
-    // Can't do this synchronously, return original — but in practice
-    // the FaceCropEditor already produces a 120x120 PNG which is ~3-8KB
-    return dataUrl;
-  } catch {
-    return dataUrl;
-  }
+function genSessionId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-// ── PeerConnection class ──
+// ── Connection class (MQTT-based, same API as PeerConnection) ──
+
+const BROKER_URL = 'wss://broker.hivemq.com:8884/mqtt';
+const TOPIC_PREFIX = 'fartman/v1/';
 
 export class PeerConnection {
-  private peer: any = null;
+  private mqtt: any = null;
   private role: Role = 'host';
   private roomId = '';
-  private conns: Map<number, any> = new Map();
-  private hostConn: any = null;
   private mySlot = 0;
   private myName = 'Player';
   private mySkinId = 'default';
   private myFaceDataUrl: string | null = null;
+  private mySessionId = genSessionId();
 
   private msgHandlers: Set<MsgHandler> = new Set();
   private connHandlers: Set<ConnHandler> = new Set();
@@ -146,18 +83,64 @@ export class PeerConnection {
 
   private players: PlayerNetInfo[] = [];
   private nextSlot = 1;
+  private connected = false;
 
-  // Connection timeout
-  private connectTimeout: ReturnType<typeof setTimeout> | null = null;
-  private static CONNECT_TIMEOUT_MS = 12000; // 12s max
+  // Topics
+  private get topicBase(): string { return `${TOPIC_PREFIX}${this.roomId}/`; }
+  private get topicJoin(): string   { return `${this.topicBase}join`; }
+  private get topicInput(): string  { return `${this.topicBase}input`; }
+  private get topicSync(): string   { return `${this.topicBase}sync`; }
 
   // ── Setup ──
 
   setMyInfo(name: string, skinId: string, faceDataUrl: string | null): void {
     this.myName = name;
     this.mySkinId = skinId;
-    // Compress face data if present
-    this.myFaceDataUrl = faceDataUrl ? compressFaceDataUrl(faceDataUrl) : null;
+    this.myFaceDataUrl = faceDataUrl;
+  }
+
+  // ── Connect to MQTT broker (shared by host and client) ──
+
+  private async _connectToBroker(onStatus?: (s: string) => void): Promise<void> {
+    onStatus?.('Loading networking library…');
+    const mqtt = await import('mqtt');
+    const MqttClient = mqtt.default ?? mqtt;
+
+    onStatus?.('Connecting to relay server…');
+    return new Promise((resolve, reject) => {
+      this.mqtt = MqttClient.connect(BROKER_URL, {
+        clientId: `fartman_${this.role}_${Math.random().toString(36).slice(2, 10)}`,
+        clean: true,
+        connectTimeout: 8000,
+        keepalive: 30,
+        reconnectPeriod: 2000,
+      });
+
+      const timeout = setTimeout(() => {
+        reject(new Error('Could not reach relay server. Check your internet.'));
+      }, 12000);
+
+      this.mqtt.on('connect', () => {
+        clearTimeout(timeout);
+        this.connected = true;
+        onStatus?.('Connected to relay server!');
+        resolve();
+      });
+
+      this.mqtt.on('error', (err: any) => {
+        clearTimeout(timeout);
+        console.error('[MQTT] error:', err);
+        if (!this.connected) {
+          reject(new Error('Relay server error. Try again.'));
+        }
+      });
+
+      this.mqtt.on('close', () => {
+        if (this.connected) {
+          this.disconnHandlers.forEach(h => h());
+        }
+      });
+    });
   }
 
   // ── Host: create room ──
@@ -166,284 +149,178 @@ export class PeerConnection {
     this.role = 'host';
     this.roomId = generateRoomCode();
 
-    onStatus?.('Loading networking library…');
-    const Peer = (await import('peerjs')).default;
+    await this._connectToBroker(onStatus);
 
-    onStatus?.('Connecting to relay server…');
-    this.peer = new Peer(this.roomId, {
-      debug: 2,
-      config: ICE_SERVERS,
-      // Explicitly use PeerJS cloud broker
-      host: '0.peerjs.com',
-      port: 443,
-      secure: true,
-    });
+    onStatus?.(`Room created! Code: ${this.roomId}`);
 
-    return new Promise((resolve, reject) => {
-      if (!this.peer) { reject(new Error('Peer not created')); return; }
+    // Host subscribes to join and input topics
+    this.mqtt.subscribe(this.topicJoin);
+    this.mqtt.subscribe(this.topicInput);
 
-      const timeout = setTimeout(() => {
-        reject(new Error('Could not connect to relay server. Check your internet connection.'));
-      }, 15000);
+    // Register self as slot 0
+    this.mySlot = 0;
+    this.players = [{
+      id: 0,
+      peerId: this.mySessionId,
+      name: this.myName,
+      skinId: this.mySkinId,
+      faceDataUrl: this.myFaceDataUrl,
+      isHost: true,
+    }];
 
-      this.peer.on('open', (id: string) => {
-        clearTimeout(timeout);
-        onStatus?.(`Room created! Code: ${this.roomId}`);
-        this.mySlot = 0;
-        this.players = [{
-          id: 0,
-          peerId: id,
-          name: this.myName,
-          skinId: this.mySkinId,
-          faceDataUrl: this.myFaceDataUrl,
-          isHost: true,
-        }];
-        resolve(this.roomId);
-      });
+    // Handle incoming messages
+    this.mqtt.on('message', (topic: string, payload: Buffer) => {
+      try {
+        const msg = JSON.parse(payload.toString()) as NetMessage;
 
-      this.peer.on('error', (err: any) => {
-        clearTimeout(timeout);
-        console.error('[Peer] host error:', err.type, err.message);
-        if (err.type === 'unavailable-id') {
-          this.roomId = generateRoomCode();
-          this.peer.destroy();
-          this.hostRoom(onStatus).then(resolve).catch(reject);
-        } else {
-          onStatus?.(`Error: ${err.type} — ${err.message}`);
-          reject(new Error(`Server error: ${err.type}. The relay may be busy, try again.`));
+        if (topic === this.topicJoin && msg.t === 'join') {
+          // New player joining
+          if (this.players.length >= 5) {
+            this.mqtt.publish(this.topicSync, JSON.stringify({
+              t: 'joinAck', yourSlot: -1, players: [], sessionId: msg.sessionId,
+            }));
+            return;
+          }
+          const slot = this.nextSlot++;
+          const pInfo: PlayerNetInfo = {
+            id: slot, peerId: msg.peerId, name: msg.name,
+            skinId: msg.skinId, faceDataUrl: msg.faceDataUrl, isHost: false,
+          };
+          this.players.push(pInfo);
+
+          // Send join ack to this specific client (via sessionId)
+          this.mqtt.publish(this.topicSync, JSON.stringify({
+            t: 'joinAck', yourSlot: slot, players: this.players, sessionId: msg.sessionId,
+          }));
+
+          // Broadcast lobby update to everyone
+          this._publish({ t: 'lobbyUpdate', players: this.players });
+          this._dispatch({ t: 'lobbyUpdate', players: this.players });
+          this.connHandlers.forEach(h => h());
+
+        } else if (topic === this.topicInput && msg.t === 'input') {
+          // Client input — dispatch with the slot included in the message
+          const inputSlot = (msg as any).slot;
+          if (typeof inputSlot === 'number') {
+            this._dispatch(msg, inputSlot);
+          }
         }
-      });
-
-      this.peer.on('connection', (conn: any) => {
-        onStatus?.(`Player connecting…`);
-        this._handleClientConn(conn);
-      });
+      } catch (e) {
+        console.error('[MQTT] parse error:', e);
+      }
     });
+
+    return this.roomId;
   }
 
-  // ── Client: join room (with retry + diagnostics) ──
+  // ── Client: join room ──
 
   async joinRoom(roomId: string, onStatus?: (s: string) => void): Promise<void> {
     this.role = 'client';
-    this.roomId = roomId;
+    this.roomId = roomId.toUpperCase();
 
-    onStatus?.('Loading networking library…');
-    const Peer = (await import('peerjs')).default;
+    await this._connectToBroker(onStatus);
 
-    onStatus?.('Connecting to relay server…');
-    this.peer = new Peer({
-      debug: 2,
-      config: ICE_SERVERS,
-      host: '0.peerjs.com',
-      port: 443,
-      secure: true,
-    });
+    onStatus?.(`Looking for room ${this.roomId}…`);
+
+    // Client subscribes to sync topic (host → all)
+    this.mqtt.subscribe(this.topicSync);
+
+    let resolved = false;
 
     return new Promise((resolve, reject) => {
-      if (!this.peer) { reject(new Error('Peer not created')); return; }
-
-      let resolved = false;
-      let connAttempt = 0;
-      const MAX_ATTEMPTS = 3;
-
-      const overallTimeout = setTimeout(() => {
+      const timeout = setTimeout(() => {
         if (resolved) return;
         resolved = true;
-        reject(new Error('Connection timed out after 25s. The room may not exist or your network blocks P2P.'));
-      }, 25000);
+        reject(new Error(`Room "${this.roomId}" not found. Make sure the host created the room and the code is correct.`));
+      }, 8000);
 
-      this.peer.on('open', (myId: string) => {
-        if (resolved) return;
-        onStatus?.(`Connected to relay. Looking for room ${roomId}…`);
+      // Listen for messages
+      this.mqtt.on('message', (topic: string, payload: Buffer) => {
+        if (topic !== this.topicSync) return;
+        try {
+          const msg = JSON.parse(payload.toString()) as NetMessage;
 
-        const tryConnect = () => {
-          connAttempt++;
-          if (resolved) return;
-          onStatus?.(`Connecting to host (attempt ${connAttempt}/${MAX_ATTEMPTS})…`);
-
-          const conn = this.peer.connect(roomId, { reliable: true });
-
-          let attemptTimeout = setTimeout(() => {
-            if (resolved) return;
-            if (connAttempt < MAX_ATTEMPTS) {
-              onStatus?.(`Attempt ${connAttempt} timed out, retrying…`);
-              try { conn.close(); } catch {}
-              setTimeout(tryConnect, 1500);
-            } else {
-              if (!resolved) {
-                resolved = true;
-                clearTimeout(overallTimeout);
-                reject(new Error('Could not connect to room after 3 attempts. Make sure the host is waiting and the code is correct.'));
-              }
-            }
-          }, 7000);
-
-          conn.on('open', () => {
-            clearTimeout(attemptTimeout);
-            clearTimeout(overallTimeout);
-            resolved = true;
-            this.hostConn = conn;
-            onStatus?.('Connected! Joining match…');
-
-            conn.send({
-              t: 'join',
-              peerId: myId,
-              name: this.myName,
-              skinId: this.mySkinId,
-              faceDataUrl: this.myFaceDataUrl,
-            });
-            resolve();
-          });
-
-          conn.on('data', (data: NetMessage) => {
-            this._dispatch(data);
-          });
-
-          conn.on('close', () => {
-            if (!resolved) {
-              onStatus?.('Connection closed by host');
-            }
-            this.disconnHandlers.forEach(h => h());
-          });
-
-          conn.on('error', (err: any) => {
-            clearTimeout(attemptTimeout);
-            console.error(`[Peer] conn error (attempt ${connAttempt}):`, err);
-            if (resolved) return;
-            if (connAttempt < MAX_ATTEMPTS) {
-              onStatus?.(`Connection error, retrying…`);
-              setTimeout(tryConnect, 1500);
-            } else {
+          if (msg.t === 'joinAck' && (msg as any).sessionId === this.mySessionId) {
+            // This is our join ack
+            if ((msg as any).yourSlot < 0) {
+              clearTimeout(timeout);
               resolved = true;
-              clearTimeout(overallTimeout);
-              reject(new Error('Could not connect after 3 attempts. The room may not exist.'));
+              reject(new Error('Room is full (max 5 players)!'));
+              return;
             }
-          });
-        };
-
-        // Small delay to ensure host is fully registered
-        setTimeout(tryConnect, 500);
-      });
-
-      this.peer.on('error', (err: any) => {
-        console.error('[Peer] error:', err.type, err.message);
-        if (resolved) return;
-        clearTimeout(overallTimeout);
-        resolved = true;
-        if (err.type === 'peer-unavailable') {
-          reject(new Error(`Room "${roomId}" not found. Make sure the host created the room and the code is correct.`));
-        } else if (err.type === 'network' || err.type === 'server-error') {
-          reject(new Error(`Cannot reach relay server (${err.type}). Check your internet connection.`));
-        } else {
-          reject(new Error(`Connection error: ${err.type}. Try again.`));
+            clearTimeout(timeout);
+            resolved = true;
+            this.mySlot = (msg as any).yourSlot;
+            this.players = (msg as any).players;
+            onStatus?.('Joined room!');
+            // Dispatch to UI
+            this._dispatch(msg, this.mySlot);
+            this.connHandlers.forEach(h => h());
+            resolve();
+          } else if (msg.t === 'lobbyUpdate') {
+            this.players = msg.players;
+            this._dispatch(msg);
+          } else if (msg.t === 'startMatch' || msg.t === 'state' || msg.t === 'eliminated' || msg.t === 'matchOver') {
+            this._dispatch(msg);
+          }
+        } catch (e) {
+          console.error('[MQTT] parse error:', e);
         }
       });
+
+      // Send join request
+      onStatus?.('Sending join request…');
+      this.mqtt.publish(this.topicJoin, JSON.stringify({
+        t: 'join',
+        peerId: this.mySessionId,
+        name: this.myName,
+        skinId: this.mySkinId,
+        faceDataUrl: this.myFaceDataUrl,
+        sessionId: this.mySessionId,
+      }));
     });
-  }
-
-  // ── Host: handle incoming client connection ──
-
-  private _handleClientConn(conn: any): void {
-    conn.on('open', () => {
-      // Waiting for join message
-    });
-
-    conn.on('data', (data: NetMessage) => {
-      if (data.t === 'join') {
-        if (this.players.length >= 5) {
-          conn.send({ t: 'joinAck', yourSlot: -1, players: [] });
-          conn.close();
-          return;
-        }
-        const slot = this.nextSlot++;
-        this.conns.set(slot, conn);
-
-        const pInfo: PlayerNetInfo = {
-          id: slot,
-          peerId: data.peerId,
-          name: data.name,
-          skinId: data.skinId,
-          faceDataUrl: data.faceDataUrl,
-          isHost: false,
-        };
-        this.players.push(pInfo);
-
-        // Send ack immediately
-        conn.send({ t: 'joinAck', yourSlot: slot, players: this.players });
-
-        // Broadcast lobby update to all clients
-        this._broadcastLobby();
-
-        // Notify our own UI
-        this.connHandlers.forEach(h => h());
-      } else if (data.t === 'input') {
-        const slot = this._findSlotByConn(conn);
-        this._dispatch(data, slot);
-      }
-    });
-
-    conn.on('close', () => {
-      const slot = this._findSlotByConn(conn);
-      if (slot >= 0) {
-        this.conns.delete(slot);
-        this.players = this.players.filter(p => p.id !== slot);
-        this._broadcast({ t: 'left', slot });
-        this._broadcastLobby();
-        this.disconnHandlers.forEach(h => h());
-      }
-    });
-  }
-
-  private _findSlotByConn(conn: any): number {
-    for (const [slot, c] of this.conns) {
-      if (c === conn) return slot;
-    }
-    return -1;
   }
 
   // ── Host: broadcast to all clients ──
 
-  private _broadcast(msg: NetMessage): void {
-    this.conns.forEach(conn => {
-      try { if (conn.open) conn.send(msg); } catch { /* ignore */ }
-    });
-  }
-
-  private _broadcastLobby(): void {
-    this._broadcast({ t: 'lobbyUpdate', players: this.players });
-    this._dispatch({ t: 'lobbyUpdate', players: this.players });
+  private _publish(msg: NetMessage): void {
+    if (!this.mqtt?.connected) return;
+    try {
+      this.mqtt.publish(this.topicSync, JSON.stringify(msg));
+    } catch { /* ignore */ }
   }
 
   // ── Host: start match ──
 
   startMatch(arenaW: number, arenaH: number): void {
-    this._broadcast({ t: 'startMatch', arenaW, arenaH });
+    this._publish({ t: 'startMatch', arenaW, arenaH });
     this._dispatch({ t: 'startMatch', arenaW, arenaH });
   }
 
   // ── Host: broadcast game state ──
 
   broadcastState(msg: NetMessage): void {
-    this._broadcast(msg);
+    this._publish(msg);
   }
 
   broadcastEliminated(slot: number): void {
-    this._broadcast({ t: 'eliminated', slot });
+    this._publish({ t: 'eliminated', slot });
   }
 
   broadcastMatchOver(winnerSlot: number, winnerName: string): void {
-    this._broadcast({ t: 'matchOver', winnerSlot, winnerName });
+    this._publish({ t: 'matchOver', winnerSlot, winnerName });
     this._dispatch({ t: 'matchOver', winnerSlot, winnerName });
   }
 
   // ── Client: send input to host ──
 
   sendInput(moveX: number, moveY: number, facing: number, attack: boolean, special: boolean): void {
-    if (this.role !== 'client' || !this.hostConn) return;
+    if (this.role !== 'client' || !this.mqtt?.connected) return;
     try {
-      if (this.hostConn.open) {
-        this.hostConn.send({ t: 'input', moveX, moveY, facing, attack, special });
-      }
+      this.mqtt.publish(this.topicInput, JSON.stringify({
+        t: 'input', moveX, moveY, facing, attack, special, slot: this.mySlot,
+      }));
     } catch { /* ignore */ }
   }
 
@@ -481,13 +358,9 @@ export class PeerConnection {
   // ── Cleanup ──
 
   destroy(): void {
-    if (this.connectTimeout) clearTimeout(this.connectTimeout);
-    this.conns.forEach(c => { try { c.close(); } catch {} });
-    this.conns.clear();
-    try { this.hostConn?.close(); } catch {}
-    try { this.peer?.destroy(); } catch {}
-    this.peer = null;
-    this.hostConn = null;
+    try { this.mqtt?.end(); } catch {}
+    this.mqtt = null;
+    this.connected = false;
     this.msgHandlers.clear();
     this.connHandlers.clear();
     this.disconnHandlers.clear();

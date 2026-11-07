@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "mqtt": "^5.16.1",
     "next": "16.4.5",
     "peerjs": "^1.5.5",
     "react": "19.3.0",
