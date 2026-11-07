@@ -219,6 +219,23 @@ export class PeerConnection {
     });
   }
 
+  // ── Subscribe to a topic and wait for confirmation ──
+
+  private _subscribe(topic: string, qos = 1): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.mqtt) { reject(new Error('Not connected')); return; }
+      const timeout = setTimeout(() => reject(new Error('Subscription timeout')), 5000);
+      this.mqtt.subscribe(topic, { qos }, (err: any) => {
+        clearTimeout(timeout);
+        if (err) reject(err);
+        else {
+          console.log(`[MQTT] Subscribed to ${topic}`);
+          resolve();
+        }
+      });
+    });
+  }
+
   // ── Host: create room ──
 
   async hostRoom(onStatus?: (s: string) => void): Promise<string> {
@@ -227,11 +244,13 @@ export class PeerConnection {
 
     await this._connectToBroker(onStatus);
 
-    onStatus?.(`Room created! Code: ${this.roomId}`);
+    onStatus?.('Setting up room…');
 
-    // Host subscribes to join and input topics
-    this.mqtt.subscribe(this.topicJoin);
-    this.mqtt.subscribe(this.topicInput);
+    // Wait for subscriptions to be confirmed before accepting joins
+    await this._subscribe(this.topicJoin);
+    await this._subscribe(this.topicInput);
+
+    onStatus?.(`Room created! Code: ${this.roomId}`);
 
     // Register self as slot 0
     this.mySlot = 0;
@@ -244,17 +263,18 @@ export class PeerConnection {
       isHost: true,
     }];
 
-    // Handle incoming messages
+    // Handle incoming messages — set up BEFORE subscriptions confirmed (already done above)
     this.mqtt.on('message', (topic: string, payload: Buffer) => {
       try {
         const msg = JSON.parse(payload.toString()) as NetMessage;
 
         if (topic === this.topicJoin && msg.t === 'join') {
+          console.log('[MQTT] Host received join from', msg.name);
           // New player joining
           if (this.players.length >= 5) {
             this.mqtt.publish(this.topicSync, JSON.stringify({
               t: 'joinAck', yourSlot: -1, players: [], sessionId: msg.sessionId,
-            }));
+            }), { qos: 1 });
             return;
           }
           const slot = this.nextSlot++;
@@ -267,7 +287,7 @@ export class PeerConnection {
           // Send join ack to this specific client (via sessionId)
           this.mqtt.publish(this.topicSync, JSON.stringify({
             t: 'joinAck', yourSlot: slot, players: this.players, sessionId: msg.sessionId,
-          }));
+          }), { qos: 1 });
 
           // Broadcast lobby update to everyone
           this._publish({ t: 'lobbyUpdate', players: this.players });
@@ -275,14 +295,13 @@ export class PeerConnection {
           this.connHandlers.forEach(h => h());
 
         } else if (topic === this.topicInput && msg.t === 'input') {
-          // Client input — dispatch with the slot included in the message
           const inputSlot = (msg as any).slot;
           if (typeof inputSlot === 'number') {
             this._dispatch(msg, inputSlot);
           }
         }
       } catch (e) {
-        console.error('[MQTT] parse error:', e);
+        console.error('[MQTT] host parse error:', e);
       }
     });
 
@@ -299,8 +318,9 @@ export class PeerConnection {
 
     onStatus?.(`Looking for room ${this.roomId}…`);
 
-    // Client subscribes to sync topic (host → all)
-    this.mqtt.subscribe(this.topicSync);
+    // Wait for subscription to be confirmed BEFORE sending join request
+    await this._subscribe(this.topicSync);
+    onStatus?.('Connected! Sending join request…');
 
     let resolved = false;
 
@@ -309,13 +329,14 @@ export class PeerConnection {
         if (resolved) return;
         resolved = true;
         reject(new Error(`Room "${this.roomId}" not found. Make sure the host created the room and the code is correct.`));
-      }, 8000);
+      }, 10000);
 
-      // Listen for messages
+      // Listen for messages on the sync topic
       this.mqtt.on('message', (topic: string, payload: Buffer) => {
         if (topic !== this.topicSync) return;
         try {
           const msg = JSON.parse(payload.toString()) as NetMessage;
+          console.log('[MQTT] Client received:', msg.t);
 
           if (msg.t === 'joinAck' && (msg as any).sessionId === this.mySessionId) {
             // This is our join ack
@@ -330,7 +351,6 @@ export class PeerConnection {
             this.mySlot = (msg as any).yourSlot;
             this.players = (msg as any).players;
             onStatus?.('Joined room!');
-            // Dispatch to UI
             this._dispatch(msg, this.mySlot);
             this.connHandlers.forEach(h => h());
             resolve();
@@ -341,12 +361,12 @@ export class PeerConnection {
             this._dispatch(msg);
           }
         } catch (e) {
-          console.error('[MQTT] parse error:', e);
+          console.error('[MQTT] client parse error:', e);
         }
       });
 
-      // Send join request
-      onStatus?.('Sending join request…');
+      // Send join request — now that subscription is confirmed
+      console.log('[MQTT] Client sending join request, sessionId:', this.mySessionId);
       this.mqtt.publish(this.topicJoin, JSON.stringify({
         t: 'join',
         peerId: this.mySessionId,
@@ -354,7 +374,7 @@ export class PeerConnection {
         skinId: this.mySkinId,
         faceDataUrl: this.myFaceDataUrl,
         sessionId: this.mySessionId,
-      }));
+      }), { qos: 1 });
     });
   }
 
