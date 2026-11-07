@@ -33,6 +33,7 @@ export default function MultiplayerLobby({
   const [error, setError] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [matchStarting, setMatchStarting] = useState(false);
+  const [statusText, setStatusText] = useState('');
   const countdownRef = useRef<number>(0);
 
   // Subscribe to messages from the connection
@@ -66,10 +67,11 @@ export default function MultiplayerLobby({
   const handleCreate = async () => {
     setError('');
     setConnecting(true);
+    setStatusText('Loading networking library…');
     try {
       if (!connRef.current) connRef.current = new PeerConnection();
       connRef.current.setMyInfo(playerName, skin.id, faceDataUrl);
-      const code = await connRef.current.hostRoom();
+      const code = await connRef.current.hostRoom((s) => setStatusText(s));
       setRoomCode(code);
       setMode('waiting');
       setPlayers(connRef.current.playerList);
@@ -85,10 +87,11 @@ export default function MultiplayerLobby({
     if (!joinCode.trim()) { setError('Enter a room code!'); return; }
     setError('');
     setConnecting(true);
+    setStatusText('Starting…');
     try {
       if (!connRef.current) connRef.current = new PeerConnection();
       connRef.current.setMyInfo(playerName, skin.id, faceDataUrl);
-      await connRef.current.joinRoom(joinCode.trim().toUpperCase());
+      await connRef.current.joinRoom(joinCode.trim().toUpperCase(), (s) => setStatusText(s));
       setRoomCode(joinCode.trim().toUpperCase());
       // Wait for joinAck — mode will switch to 'waiting' in message handler
     } catch (e: any) {
@@ -158,10 +161,13 @@ export default function MultiplayerLobby({
             </div>
             {error && <p className="text-red-400 text-sm text-center">{error}</p>}
             {connecting && (
-              <div className="text-center space-y-2">
-                <div className="text-yellow-400 text-sm animate-pulse">🔗 Connecting to room…</div>
-                <div className="text-gray-500 text-xs">
-                  Connecting P2P can take up to 20 seconds on some networks.<br />
+              <div className="text-center space-y-2 py-2">
+                <div className="flex items-center justify-center gap-2">
+                  <div className="w-4 h-4 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />
+                  <span className="text-yellow-400 text-sm font-bold">{statusText || 'Connecting…'}</span>
+                </div>
+                <div className="text-gray-500 text-xs px-4">
+                  Multiplayer uses P2P WebRTC. On some networks this can take up to 25 seconds.<br />
                   Make sure the host has created the room and is still waiting.
                 </div>
               </div>
@@ -183,19 +189,30 @@ export default function MultiplayerLobby({
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4">
         <div className="bg-gray-900 border-2 border-red-500 rounded-3xl w-full max-w-sm overflow-hidden">
           <div className="bg-red-600 py-4 text-center">
-            <span className="text-2xl font-black text-white">⚠️ Oops!</span>
+            <span className="text-2xl font-black text-white">⚠️ Connection Failed</span>
           </div>
           <div className="p-6 text-center space-y-4">
-            <p className="text-white">{error}</p>
-            <button
-              onClick={() => { setMode('choose'); setError(''); }}
-              className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold transition-colors"
-            >
-              Try Again
-            </button>
-            <button onClick={handleBack} className="w-full py-3 rounded-xl bg-gray-700 text-white font-bold">
-              Back to Menu
-            </button>
+            <p className="text-white text-sm">{error}</p>
+            {statusText && <p className="text-gray-500 text-xs">Last status: {statusText}</p>}
+            <div className="space-y-2">
+              {joinCode.trim() && (
+                <button
+                  onClick={() => { setMode('choose'); setError(''); handleJoin(); }}
+                  className="w-full py-3 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold transition-colors"
+                >
+                  🔄 Retry Join Room
+                </button>
+              )}
+              <button
+                onClick={() => { setMode('choose'); setError(''); }}
+                className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold transition-colors"
+              >
+                Enter Different Code
+              </button>
+              <button onClick={handleBack} className="w-full py-3 rounded-xl bg-gray-700 text-white font-bold">
+                Back to Menu
+              </button>
+            </div>
           </div>
         </div>
       </div>

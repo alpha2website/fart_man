@@ -162,29 +162,37 @@ export class PeerConnection {
 
   // ── Host: create room ──
 
-  async hostRoom(): Promise<string> {
+  async hostRoom(onStatus?: (s: string) => void): Promise<string> {
     this.role = 'host';
     this.roomId = generateRoomCode();
 
+    onStatus?.('Loading networking library…');
     const Peer = (await import('peerjs')).default;
+
+    onStatus?.('Connecting to relay server…');
     this.peer = new Peer(this.roomId, {
-      debug: 1,
+      debug: 2,
       config: ICE_SERVERS,
+      // Explicitly use PeerJS cloud broker
+      host: '0.peerjs.com',
+      port: 443,
+      secure: true,
     });
 
     return new Promise((resolve, reject) => {
       if (!this.peer) { reject(new Error('Peer not created')); return; }
 
       const timeout = setTimeout(() => {
-        reject(new Error('Connection timed out. Check your internet.'));
-      }, PeerConnection.CONNECT_TIMEOUT_MS);
+        reject(new Error('Could not connect to relay server. Check your internet connection.'));
+      }, 15000);
 
-      this.peer.on('open', () => {
+      this.peer.on('open', (id: string) => {
         clearTimeout(timeout);
+        onStatus?.(`Room created! Code: ${this.roomId}`);
         this.mySlot = 0;
         this.players = [{
           id: 0,
-          peerId: this.peer.id,
+          peerId: id,
           name: this.myName,
           skinId: this.mySkinId,
           faceDataUrl: this.myFaceDataUrl,
@@ -195,119 +203,139 @@ export class PeerConnection {
 
       this.peer.on('error', (err: any) => {
         clearTimeout(timeout);
-        console.error('[Peer] error:', err);
+        console.error('[Peer] host error:', err.type, err.message);
         if (err.type === 'unavailable-id') {
           this.roomId = generateRoomCode();
           this.peer.destroy();
-          this.hostRoom().then(resolve).catch(reject);
+          this.hostRoom(onStatus).then(resolve).catch(reject);
         } else {
-          reject(err);
+          onStatus?.(`Error: ${err.type} — ${err.message}`);
+          reject(new Error(`Server error: ${err.type}. The relay may be busy, try again.`));
         }
       });
 
       this.peer.on('connection', (conn: any) => {
+        onStatus?.(`Player connecting…`);
         this._handleClientConn(conn);
       });
     });
   }
 
-  // ── Client: join room (with retry) ──
+  // ── Client: join room (with retry + diagnostics) ──
 
-  async joinRoom(roomId: string): Promise<void> {
+  async joinRoom(roomId: string, onStatus?: (s: string) => void): Promise<void> {
     this.role = 'client';
     this.roomId = roomId;
 
+    onStatus?.('Loading networking library…');
     const Peer = (await import('peerjs')).default;
-    this.peer = new Peer({ debug: 1, config: ICE_SERVERS });
+
+    onStatus?.('Connecting to relay server…');
+    this.peer = new Peer({
+      debug: 2,
+      config: ICE_SERVERS,
+      host: '0.peerjs.com',
+      port: 443,
+      secure: true,
+    });
 
     return new Promise((resolve, reject) => {
       if (!this.peer) { reject(new Error('Peer not created')); return; }
 
-      let timedOut = false;
+      let resolved = false;
       let connAttempt = 0;
       const MAX_ATTEMPTS = 3;
-      let conn: any = null;
 
-      // Overall timeout — generous for slow mobile networks
       const overallTimeout = setTimeout(() => {
-        timedOut = true;
-        reject(new Error('Connection timed out after 20s. Check the room code and try again.'));
-      }, 20000);
+        if (resolved) return;
+        resolved = true;
+        reject(new Error('Connection timed out after 25s. The room may not exist or your network blocks P2P.'));
+      }, 25000);
 
-      const tryConnect = () => {
-        connAttempt++;
-        if (timedOut) return;
+      this.peer.on('open', (myId: string) => {
+        if (resolved) return;
+        onStatus?.(`Connected to relay. Looking for room ${roomId}…`);
 
-        // Connect to host — reliable, default serialization (BinaryPack)
-        conn = this.peer.connect(roomId, { reliable: true });
+        const tryConnect = () => {
+          connAttempt++;
+          if (resolved) return;
+          onStatus?.(`Connecting to host (attempt ${connAttempt}/${MAX_ATTEMPTS})…`);
 
-        // Per-attempt timeout
-        const attemptTimeout = setTimeout(() => {
-          if (timedOut) return;
-          if (connAttempt < MAX_ATTEMPTS) {
-            // Retry
-            console.log(`[Peer] Connection attempt ${connAttempt} timed out, retrying…`);
-            try { conn.close(); } catch {}
-            setTimeout(tryConnect, 1000);
-          } else {
-            if (!timedOut) {
-              reject(new Error('Could not reach room. The room may not exist or your network may be blocking P2P connections.'));
+          const conn = this.peer.connect(roomId, { reliable: true });
+
+          let attemptTimeout = setTimeout(() => {
+            if (resolved) return;
+            if (connAttempt < MAX_ATTEMPTS) {
+              onStatus?.(`Attempt ${connAttempt} timed out, retrying…`);
+              try { conn.close(); } catch {}
+              setTimeout(tryConnect, 1500);
+            } else {
+              if (!resolved) {
+                resolved = true;
+                clearTimeout(overallTimeout);
+                reject(new Error('Could not connect to room after 3 attempts. Make sure the host is waiting and the code is correct.'));
+              }
             }
-          }
-        }, 8000);
+          }, 7000);
 
-        conn.on('open', () => {
-          clearTimeout(attemptTimeout);
-          clearTimeout(overallTimeout);
-          this.hostConn = conn;
-
-          // Send join
-          conn.send({
-            t: 'join',
-            peerId: this.peer.id,
-            name: this.myName,
-            skinId: this.mySkinId,
-            faceDataUrl: this.myFaceDataUrl,
-          });
-          resolve();
-        });
-
-        conn.on('data', (data: NetMessage) => {
-          this._dispatch(data);
-        });
-
-        conn.on('close', () => {
-          this.disconnHandlers.forEach(h => h());
-        });
-
-        conn.on('error', (err: any) => {
-          clearTimeout(attemptTimeout);
-          console.error(`[Peer] conn error (attempt ${connAttempt}):`, err);
-          if (timedOut) return;
-          if (connAttempt < MAX_ATTEMPTS) {
-            setTimeout(tryConnect, 1000);
-          } else {
+          conn.on('open', () => {
+            clearTimeout(attemptTimeout);
             clearTimeout(overallTimeout);
-            reject(new Error('Connection failed. The room may not exist.'));
-          }
-        });
-      };
+            resolved = true;
+            this.hostConn = conn;
+            onStatus?.('Connected! Joining match…');
 
-      this.peer.on('open', () => {
-        if (timedOut) return;
-        console.log('[Peer] Client peer open, connecting to host…');
-        tryConnect();
+            conn.send({
+              t: 'join',
+              peerId: myId,
+              name: this.myName,
+              skinId: this.mySkinId,
+              faceDataUrl: this.myFaceDataUrl,
+            });
+            resolve();
+          });
+
+          conn.on('data', (data: NetMessage) => {
+            this._dispatch(data);
+          });
+
+          conn.on('close', () => {
+            if (!resolved) {
+              onStatus?.('Connection closed by host');
+            }
+            this.disconnHandlers.forEach(h => h());
+          });
+
+          conn.on('error', (err: any) => {
+            clearTimeout(attemptTimeout);
+            console.error(`[Peer] conn error (attempt ${connAttempt}):`, err);
+            if (resolved) return;
+            if (connAttempt < MAX_ATTEMPTS) {
+              onStatus?.(`Connection error, retrying…`);
+              setTimeout(tryConnect, 1500);
+            } else {
+              resolved = true;
+              clearTimeout(overallTimeout);
+              reject(new Error('Could not connect after 3 attempts. The room may not exist.'));
+            }
+          });
+        };
+
+        // Small delay to ensure host is fully registered
+        setTimeout(tryConnect, 500);
       });
 
       this.peer.on('error', (err: any) => {
+        console.error('[Peer] error:', err.type, err.message);
+        if (resolved) return;
         clearTimeout(overallTimeout);
-        console.error('[Peer] error:', err);
-        if (!timedOut) {
-          if (err.type === 'peer-unavailable') {
-            reject(new Error('Room not found. Check the code and make sure the host is still in the room.'));
-          } else {
-            reject(err);
-          }
+        resolved = true;
+        if (err.type === 'peer-unavailable') {
+          reject(new Error(`Room "${roomId}" not found. Make sure the host created the room and the code is correct.`));
+        } else if (err.type === 'network' || err.type === 'server-error') {
+          reject(new Error(`Cannot reach relay server (${err.type}). Check your internet connection.`));
+        } else {
+          reject(new Error(`Connection error: ${err.type}. Try again.`));
         }
       });
     });
