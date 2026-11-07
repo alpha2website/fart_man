@@ -62,10 +62,56 @@ function genSessionId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+// ── CDN loader for mqtt.js (avoids bundler issues) ──
+
+let mqttLib: any = null;
+
+async function loadMqtt(): Promise<any> {
+  if (mqttLib) return mqttLib;
+
+  // Try loading from CDN — this is the browser build of mqtt.js
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js';
+    script.async = true;
+    script.onload = () => {
+      // mqtt.js exposes itself as window.mqtt
+      mqttLib = (window as any).mqtt;
+      if (mqttLib) {
+        console.log('[MQTT] Library loaded from CDN');
+        resolve(mqttLib);
+      } else {
+        reject(new Error('MQTT library failed to initialize'));
+      }
+    };
+    script.onerror = () => {
+      // Try alternate CDN
+      const alt = document.createElement('script');
+      alt.src = 'https://cdn.jsdelivr.net/npm/mqtt@4.3.7/dist/mqtt.min.js';
+      alt.async = true;
+      alt.onload = () => {
+        mqttLib = (window as any).mqtt;
+        if (mqttLib) {
+          console.log('[MQTT] Library loaded from alternate CDN');
+          resolve(mqttLib);
+        } else {
+          reject(new Error('MQTT library failed to load from any CDN'));
+        }
+      };
+      alt.onerror = () => reject(new Error('Could not load networking library. Check your internet.'));
+      document.head.appendChild(alt);
+    };
+    document.head.appendChild(script);
+  });
+}
+
 // ── Connection class (MQTT-based, same API as PeerConnection) ──
 
-const BROKER_URL = 'wss://broker.hivemq.com:8884/mqtt';
-const TOPIC_PREFIX = 'fartman/v1/';
+// Try multiple brokers for reliability
+const BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt',
+];
 
 export class PeerConnection {
   private mqtt: any = null;
@@ -84,9 +130,10 @@ export class PeerConnection {
   private players: PlayerNetInfo[] = [];
   private nextSlot = 1;
   private connected = false;
+  private brokerIndex = 0;
 
   // Topics
-  private get topicBase(): string { return `${TOPIC_PREFIX}${this.roomId}/`; }
+  private get topicBase(): string { return `fartman/v1/${this.roomId}/`; }
   private get topicJoin(): string   { return `${this.topicBase}join`; }
   private get topicInput(): string  { return `${this.topicBase}input`; }
   private get topicSync(): string   { return `${this.topicBase}sync`; }
@@ -103,40 +150,69 @@ export class PeerConnection {
 
   private async _connectToBroker(onStatus?: (s: string) => void): Promise<void> {
     onStatus?.('Loading networking library…');
-    const mqtt = await import('mqtt');
-    const MqttClient = mqtt.default ?? mqtt;
+    const mqtt = await loadMqtt();
+    const MqttClient = mqtt.connect ?? mqtt;
 
     onStatus?.('Connecting to relay server…');
+
+    // Try each broker until one works
+    for (let i = 0; i < BROKERS.length; i++) {
+      const brokerUrl = BROKERS[(this.brokerIndex + i) % BROKERS.length];
+      try {
+        onStatus?.(`Connecting to relay (${i + 1}/${BROKERS.length})…`);
+        await this._tryBroker(MqttClient, brokerUrl, onStatus);
+        this.brokerIndex = (this.brokerIndex + i) % BROKERS.length; // remember which worked
+        return;
+      } catch (err) {
+        console.warn(`[MQTT] Broker ${brokerUrl} failed:`, err);
+        if (i < BROKERS.length - 1) {
+          onStatus?.('Relay busy, trying another server…');
+        }
+      }
+    }
+    throw new Error('Could not connect to any relay server. Check your internet connection.');
+  }
+
+  private _tryBroker(MqttClient: any, brokerUrl: string, onStatus?: (s: string) => void): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.mqtt = MqttClient.connect(BROKER_URL, {
-        clientId: `fartman_${this.role}_${Math.random().toString(36).slice(2, 10)}`,
+      let settled = false;
+      const client = MqttClient(brokerUrl, {
+        clientId: `fm_${this.role}_${Math.random().toString(36).slice(2, 12)}`,
         clean: true,
-        connectTimeout: 8000,
+        connectTimeout: 6000,
         keepalive: 30,
-        reconnectPeriod: 2000,
+        reconnectPeriod: 0,  // don't auto-reconnect during initial connect
       });
 
       const timeout = setTimeout(() => {
-        reject(new Error('Could not reach relay server. Check your internet.'));
-      }, 12000);
+        if (settled) return;
+        settled = true;
+        try { client.end(); } catch {}
+        reject(new Error(`Timeout connecting to ${brokerUrl}`));
+      }, 8000);
 
-      this.mqtt.on('connect', () => {
+      client.on('connect', () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
         this.connected = true;
+        this.mqtt = client;
+        // Re-enable reconnect for after connection
+        client.options.reconnectPeriod = 2000;
         onStatus?.('Connected to relay server!');
         resolve();
       });
 
-      this.mqtt.on('error', (err: any) => {
+      client.on('error', (err: any) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
-        console.error('[MQTT] error:', err);
-        if (!this.connected) {
-          reject(new Error('Relay server error. Try again.'));
-        }
+        try { client.end(); } catch {}
+        reject(err);
       });
 
-      this.mqtt.on('close', () => {
-        if (this.connected) {
+      client.on('close', () => {
+        if (this.connected && this.mqtt === client) {
           this.disconnHandlers.forEach(h => h());
         }
       });
