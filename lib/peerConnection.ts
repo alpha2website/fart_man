@@ -219,6 +219,17 @@ export class PeerConnection {
     });
   }
 
+  // ── Decode MQTT payload (Uint8Array in browser, Buffer in Node) ──
+
+  private _decodePayload(payload: any): string {
+    if (typeof payload === 'string') return payload;
+    if (payload instanceof Uint8Array || ArrayBuffer.isView(payload)) {
+      return new TextDecoder().decode(payload);
+    }
+    // Fallback for older browsers
+    try { return String.fromCharCode.apply(null, payload); } catch { return ''; }
+  }
+
   // ── Subscribe to a topic and wait for confirmation ──
 
   private _subscribe(topic: string, qos = 1): Promise<void> {
@@ -264,9 +275,9 @@ export class PeerConnection {
     }];
 
     // Handle incoming messages — set up BEFORE subscriptions confirmed (already done above)
-    this.mqtt.on('message', (topic: string, payload: Buffer) => {
+    this.mqtt.on('message', (topic: string, payload: any) => {
       try {
-        const msg = JSON.parse(payload.toString()) as NetMessage;
+        const msg = JSON.parse(this._decodePayload(payload)) as NetMessage;
 
         if (topic === this.topicJoin && msg.t === 'join') {
           console.log('[MQTT] Host received join from', msg.name);
@@ -332,10 +343,10 @@ export class PeerConnection {
       }, 10000);
 
       // Listen for messages on the sync topic
-      this.mqtt.on('message', (topic: string, payload: Buffer) => {
+      this.mqtt.on('message', (topic: string, payload: any) => {
         if (topic !== this.topicSync) return;
         try {
-          const msg = JSON.parse(payload.toString()) as NetMessage;
+          const msg = JSON.parse(this._decodePayload(payload)) as NetMessage;
           console.log('[MQTT] Client received:', msg.t);
 
           if (msg.t === 'joinAck' && (msg as any).sessionId === this.mySessionId) {
