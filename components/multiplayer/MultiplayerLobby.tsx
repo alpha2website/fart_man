@@ -55,11 +55,11 @@ export default function MultiplayerLobby({
           return;
         }
         conn.setSlot((msg as any).yourSlot);
-        setPlayers((msg as any).players ?? []);
+        setPlayers([...((msg as any).players ?? [])]);
         setMode('waiting');
         setConnecting(false);
       } else if (msg.t === 'lobbyUpdate') {
-        setPlayers(msg.players ?? []);
+        setPlayers([...(msg.players ?? [])]);
       } else if (msg.t === 'startMatch') {
         setMatchStarting(true);
         setTimeout(() => onMatchStart(), 500);
@@ -84,7 +84,7 @@ export default function MultiplayerLobby({
       const code = await connRef.current.hostRoom((s) => setStatusText(s));
       setRoomCode(code);
       setMode('waiting');
-      setPlayers(connRef.current.playerList);
+      setPlayers([...connRef.current.playerList]);
       // Register message handler AFTER connection is created
       setupMessageHandler();
     } catch (e: any) {

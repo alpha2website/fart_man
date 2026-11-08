@@ -300,9 +300,11 @@ export class PeerConnection {
             t: 'joinAck', yourSlot: slot, players: this.players, sessionId: msg.sessionId,
           }), { qos: 1 });
 
-          // Broadcast lobby update to everyone
-          this._publish({ t: 'lobbyUpdate', players: this.players });
-          this._dispatch({ t: 'lobbyUpdate', players: this.players });
+          // Broadcast lobby update to everyone — create a COPY of the array
+          // so React detects the change (same array reference = no re-render)
+          const playersCopy = [...this.players];
+          this._publish({ t: 'lobbyUpdate', players: playersCopy });
+          this._dispatch({ t: 'lobbyUpdate', players: playersCopy });
           this.connHandlers.forEach(h => h());
 
         } else if (topic === this.topicInput && msg.t === 'input') {
