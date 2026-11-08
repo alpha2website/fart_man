@@ -365,7 +365,7 @@ export class PeerConnection {
         conn.on('data', (data: any) => {
           try {
             const msg = typeof data === 'string' ? JSON.parse(data) : data;
-            // State arrives over RTC — fast path
+            // Route all message types over fast RTC path
             this._dispatch(msg);
           } catch {}
         });
@@ -432,7 +432,12 @@ export class PeerConnection {
 
   broadcastMatchOver(winnerSlot: number, winnerName: string): void {
     const msg = { t: 'matchOver', winnerSlot, winnerName } as NetMessage;
+    // Send via BOTH MQTT and RTC to ensure delivery
     this._mqttPublish(this.topicSync, msg);
+    if (this.rtcReady) {
+      const p = JSON.stringify(msg);
+      this.rtcConns.forEach(c => { try { if (c.open) c.send(p); } catch {} });
+    }
     this._dispatch(msg);
   }
 

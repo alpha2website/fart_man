@@ -158,6 +158,7 @@ export class MultiplayerEngine {
   private countdown  = 3;
   private countdownTimer = 0;
   private shake = 0;
+  private clientRenderAccum = 0;
   private elimFeed: { text: string; alpha: number }[] = [];
 
   constructor(canvas: HTMLCanvasElement, conn: PeerConnection, audio: AudioManager) {
@@ -216,9 +217,29 @@ export class MultiplayerEngine {
 
   setLocalInput(input: InputState): void {
     this.localInput = { ...input };
-    // Clients forward their input to the host over MQTT
+    // Clients forward their input to the host over MQTT/RTC
     if (!this.conn.isHost) {
       this.conn.sendInput(input.moveX, input.moveY, input.facing, input.attack, input.special);
+      // ── CLIENT-SIDE PREDICTION ──
+      // Run movement for our own player immediately, without waiting for host.
+      // This makes controls feel instant (Play Store game feel).
+      // The host will correct our position via state broadcasts.
+      const mySlot = this.conn.slot;
+      const p = this.players.get(mySlot);
+      if (p && p.alive && this.countdown <= 0 && !this.matchOver) {
+        const frames = 1; // predict one frame ahead
+        const spd = MOVE_SPEED * frames;
+        const len = Math.hypot(input.moveX, input.moveY);
+        if (len > 0.05) {
+          p.x += (input.moveX / Math.max(len, 1)) * spd;
+          p.y += (input.moveY / Math.max(len, 1)) * spd;
+          p.x = clamp(p.x, PLAYER_R, ARENA_W - PLAYER_R);
+          p.y = clamp(p.y, PLAYER_R, ARENA_H - PLAYER_R);
+          p.facing = input.facing;
+          // Resolve walls for predicted position too
+          this._resolveWalls(p);
+        }
+      }
     }
   }
 
@@ -249,14 +270,21 @@ export class MultiplayerEngine {
         };
         this.players.set(snap.slot, p);
       }
-      // Snap instantly if position differs a lot (teleport / spawn), else lerp
+      // Reconcile predicted position with authoritative server position
+      // Use tight lerp for our own player (prediction correction),
+      // looser lerp for other players (interpolation)
+      const isMyPlayer = snap.slot === this.conn.slot;
       const dx = snap.x - p.x, dy = snap.y - p.y;
       const dist = Math.hypot(dx, dy);
-      if (dist > 80) {
-        p.x = snap.x; p.y = snap.y;           // big jump — snap
-      } else {
-        p.x += dx * 0.45; p.y += dy * 0.45;   // small delta — smooth lerp
+      if (dist > 100) {
+        // Large discrepancy — snap immediately (teleport / respawn)
+        p.x = snap.x; p.y = snap.y;
+      } else if (dist > 2) {
+        // Small drift — smooth correction
+        const lerpFactor = isMyPlayer ? 0.25 : 0.45;
+        p.x += dx * lerpFactor; p.y += dy * lerpFactor;
       }
+      // If dist <= 2px, keep predicted position (close enough, no visible pop)
       p.hp = snap.hp; p.alive = snap.alive;
       p.facing = snap.facing;
       p.attackCool  = snap.attackCool ?? 0;
@@ -279,10 +307,6 @@ export class MultiplayerEngine {
 
   // ── Game loop ────────────────────────────────────────────────
 
-  // Accumulated time for client render throttle
-  private clientRenderAccum = 0;
-  private CLIENT_RENDER_INTERVAL = 33; // ~30fps for clients
-
   private _loop(ts: number): void {
     if (!this.running) return;
     const dt = Math.min(ts - this.lastTime, 50);
@@ -290,18 +314,14 @@ export class MultiplayerEngine {
     this.frameTime += dt;
 
     if (this.conn.isHost) {
-      // Host runs physics + renders at full 60fps
       this._hostUpdate(dt);
-      this._render();
     } else {
-      // Clients only render — throttled to ~30fps
+      // Clients still need frameTime to increment for animations
       this.clientRenderAccum += dt;
-      if (this.clientRenderAccum >= this.CLIENT_RENDER_INTERVAL) {
-        this.clientRenderAccum = 0;
-        this._render();
-      }
     }
 
+    // Always render every frame — client prediction needs instant visual feedback
+    this._render();
     this.frameId = requestAnimationFrame(t => this._loop(t));
   }
 
