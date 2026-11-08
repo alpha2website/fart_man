@@ -408,9 +408,12 @@ export class PeerConnection {
   }
 
   // ── Host: broadcast game state ──
-
+  // QoS 0 (fire-and-forget) for state — losing a frame is fine, ACKs cause lag
   broadcastState(msg: NetMessage): void {
-    this._publish(msg);
+    if (!this.mqtt?.connected) return;
+    try {
+      this.mqtt.publish(this.topicSync, JSON.stringify(msg));
+    } catch { /* ignore */ }
   }
 
   broadcastEliminated(slot: number): void {

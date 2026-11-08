@@ -234,7 +234,7 @@ export class MultiplayerEngine {
     if (typeof msg.matchOver === 'boolean') this.matchOver = msg.matchOver;
     if (typeof msg.winnerSlot === 'number') this.winnerSlot = msg.winnerSlot;
 
-    // Sync players
+    // Sync players — lerp towards received positions for smooth movement
     (msg.players ?? []).forEach((snap: any) => {
       let p = this.players.get(snap.slot);
       if (!p) {
@@ -249,12 +249,19 @@ export class MultiplayerEngine {
         };
         this.players.set(snap.slot, p);
       }
-      p.x = snap.x; p.y = snap.y;
+      // Snap instantly if position differs a lot (teleport / spawn), else lerp
+      const dx = snap.x - p.x, dy = snap.y - p.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 80) {
+        p.x = snap.x; p.y = snap.y;           // big jump — snap
+      } else {
+        p.x += dx * 0.45; p.y += dy * 0.45;   // small delta — smooth lerp
+      }
       p.hp = snap.hp; p.alive = snap.alive;
       p.facing = snap.facing;
-      p.attackCool = snap.attackCool ?? 0;
+      p.attackCool  = snap.attackCool ?? 0;
       p.specialCool = snap.specialCool ?? 0;
-      p.invuln = snap.invuln ?? 0;
+      p.invuln  = snap.invuln ?? 0;
       p.hitFlash = snap.hitFlash ?? 0;
     });
 
@@ -272,6 +279,10 @@ export class MultiplayerEngine {
 
   // ── Game loop ────────────────────────────────────────────────
 
+  // Accumulated time for client render throttle
+  private clientRenderAccum = 0;
+  private CLIENT_RENDER_INTERVAL = 33; // ~30fps for clients
+
   private _loop(ts: number): void {
     if (!this.running) return;
     const dt = Math.min(ts - this.lastTime, 50);
@@ -279,13 +290,14 @@ export class MultiplayerEngine {
     this.frameTime += dt;
 
     if (this.conn.isHost) {
-      // Host: run physics every frame (60fps)
+      // Host runs physics + renders at full 60fps
       this._hostUpdate(dt);
       this._render();
     } else {
-      // Client: only render at ~30fps to save mobile CPU
-      // Physics runs on host — clients just interpolate received state
-      if (dt >= 16) {
+      // Clients only render — throttled to ~30fps
+      this.clientRenderAccum += dt;
+      if (this.clientRenderAccum >= this.CLIENT_RENDER_INTERVAL) {
+        this.clientRenderAccum = 0;
         this._render();
       }
     }
@@ -451,7 +463,8 @@ export class MultiplayerEngine {
       this.shake = 20;
     }
 
-    // State broadcast @20Hz (50ms) — good balance of responsiveness vs MQTT traffic
+    // State broadcast: 50ms (20Hz) — reduced from 33ms, plenty for battle game
+    // Host broadcasts its own authoritative state; clients interpolate between updates
     this.stateTimer += dt;
     if (this.stateTimer >= 50) { this.stateTimer = 0; this._broadcastState(); }
   }
