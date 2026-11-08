@@ -153,6 +153,11 @@ export default function FartManGame() {
     setTimeout(() => engineRef.current?.restart(), 120);
   }, []);
 
+  // Stable player name — generated once on client, never changes
+  const playerNameRef = useRef('');
+  if (!playerNameRef.current && typeof window !== 'undefined') {
+    playerNameRef.current = `Player${Math.floor(Math.random() * 999) + 1}`;
+  }
   const isPaused = gameState === 'paused';
 
   return (
@@ -235,7 +240,7 @@ export default function FartManGame() {
           connRef={connRef}
           skin={selectedSkin}
           faceDataUrl={getFaceDataUrl()}
-          playerName={`Player${Math.floor(Math.random() * 1000)}`}
+          playerName={playerNameRef.current}
           onMatchStart={handleMatchStart}
           onBack={handleMultiplayerExit}
         />

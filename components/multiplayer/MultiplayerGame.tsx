@@ -25,6 +25,8 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
   const [winnerName,  setWinnerName]  = useState('');
   // Default to showing controls — hide them for desktop after mount
   const [isMobile,    setIsMobile]    = useState(true);
+  // Visual joystick knob position (0..1 range, displayed as CSS px)
+  const [joyKnob,     setJoyKnob]     = useState({ x: 0, y: 0 });
 
   // ── Input refs ────────────────────────────────────────────
   const keysRef      = useRef<Record<string, boolean>>({});
@@ -32,6 +34,7 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
   const specialHeld  = useRef(false);
   const joyRef       = useRef({ active: false, cx: 0, cy: 0, dx: 0, dy: 0 });
   const facingRef    = useRef<1 | -1>(1);
+  const lastInputRef = useRef('');   // serialised last-sent input — skip if unchanged
 
   const flush = useCallback(() => {
     let mx = 0, my = 0;
@@ -51,12 +54,18 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     if (mx !== 0) facingRef.current = mx > 0 ? 1 : -1;
 
     const inp: InputState = {
-      moveX:   mx,
-      moveY:   my,
+      moveX:   Math.round(mx * 100) / 100,   // 2dp to reduce noise
+      moveY:   Math.round(my * 100) / 100,
       facing:  facingRef.current,
       attack:  attackHeld.current,
       special: specialHeld.current,
     };
+
+    // Only send if something actually changed — reduces mobile MQTT flood
+    const serial = `${inp.moveX},${inp.moveY},${inp.facing},${inp.attack},${inp.special}`;
+    if (serial === lastInputRef.current) return;
+    lastInputRef.current = serial;
+
     engineRef.current?.setLocalInput(inp);
   }, []);
 
@@ -83,11 +92,12 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     return () => { window.removeEventListener('keydown', dn); window.removeEventListener('keyup', up); };
   }, [flush]);
 
-  // ── Polling loop — sends held state @30Hz ─────────────────
+  // ── Polling loop — sends held state, 50ms on mobile / 33ms desktop ─────────────────
   useEffect(() => {
-    const id = setInterval(flush, 33);
+    const interval = isMobile ? 50 : 33;
+    const id = setInterval(flush, interval);
     return () => clearInterval(id);
-  }, [flush]);
+  }, [flush, isMobile]);
 
   // ── Detect mobile — default true, hide for desktop after mount ─────────────────
   useEffect(() => {
@@ -192,10 +202,10 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
 
   // ── Touch controls ────────────────────────────────────────
   // Joystick — use the touch start position as the joystick centre
-  // so it works regardless of where the element is on screen
   const onJoyStart = (e: React.TouchEvent) => {
     const t = e.touches[0];
     joyRef.current = { active: true, cx: t.clientX, cy: t.clientY, dx: 0, dy: 0 };
+    setJoyKnob({ x: 0, y: 0 });
   };
   const onJoyMove = (e: React.TouchEvent) => {
     if (!joyRef.current.active) return;
@@ -207,10 +217,15 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     const cl   = len > maxR ? maxR / len : 1;
     joyRef.current.dx = (dx * cl) / maxR;
     joyRef.current.dy = (dy * cl) / maxR;
+    // Update knob visual position (capped at maxR px from centre)
+    const kx = dx * cl;
+    const ky = dy * cl;
+    setJoyKnob({ x: kx, y: ky });
     flush();
   };
   const onJoyEnd = () => {
     joyRef.current = { active: false, cx: 0, cy: 0, dx: 0, dy: 0 };
+    setJoyKnob({ x: 0, y: 0 });
     flush();
   };
 
@@ -250,7 +265,7 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
       {/* Mobile touch controls — always shown on touch devices */}
       {isMobile && !matchOver && (
         <>
-          {/* Virtual joystick — bottom left */}
+          {/* Virtual joystick — bottom left with moving knob */}
           <div
             className="absolute bottom-6 left-5 w-32 h-32 rounded-full bg-white/10 border-2 border-white/30 z-40 flex items-center justify-center"
             style={{ touchAction: 'none' }}
@@ -259,7 +274,14 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
             onTouchEnd={onJoyEnd}
             onTouchCancel={onJoyEnd}
           >
-            <div className="w-14 h-14 rounded-full bg-white/25 border-2 border-white/40" />
+            {/* Knob — moves with finger */}
+            <div
+              className="w-14 h-14 rounded-full bg-white/40 border-2 border-white/60 shadow-lg"
+              style={{
+                transform: `translate(${joyKnob.x}px, ${joyKnob.y}px)`,
+                transition: joyRef.current.active ? 'none' : 'transform 0.1s ease-out',
+              }}
+            />
           </div>
 
           {/* Attack — bottom right, larger for easy tap */}

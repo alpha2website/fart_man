@@ -350,7 +350,7 @@ export class MultiplayerEngine {
           life: PROJ_LIFE, radius: PROJ_R,
         });
         this.audio.playFartSFX();
-        this.particles.emit('fart_small', p.x, p.y, 5);
+        this.particles.emit('fart_small', p.x, p.y, 3);  // reduced count for mobile perf
       }
 
       // ── Gas bomb (special) ──
@@ -439,9 +439,9 @@ export class MultiplayerEngine {
       this.shake = 20;
     }
 
-    // State broadcast @30Hz
+    // State broadcast @20Hz (50ms) — good balance of responsiveness vs MQTT traffic
     this.stateTimer += dt;
-    if (this.stateTimer >= 33) { this.stateTimer = 0; this._broadcastState(); }
+    if (this.stateTimer >= 50) { this.stateTimer = 0; this._broadcastState(); }
   }
 
   // ── Axis-separated wall resolution ──
