@@ -110,26 +110,23 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     const conn = connRef.current;
     if (!canvas || !conn) return;
 
-    // Setup canvas with DPR
-    const dpr = Math.min(window.devicePixelRatio ?? 1, 2);
-    canvas.width = ARENA_W * dpr;
-    canvas.height = ARENA_H * dpr;
-    const ctx = canvas.getContext('2d')!;
-    ctx.scale(dpr, dpr);
-
-    // Scale canvas to fit screen
+    // Setup canvas — fill entire screen (object-fit: cover style)
     const resize = () => {
       const container = canvas.parentElement;
       if (!container) return;
       const cw = container.clientWidth;
       const ch = container.clientHeight;
-      const ar = ARENA_W / ARENA_H;
-      const car = cw / ch;
-      let dw, dh;
-      if (car > ar) { dh = ch; dw = ch * ar; }
-      else { dw = cw; dh = cw / ar; }
-      canvas.style.width = `${dw}px`;
-      canvas.style.height = `${dh}px`;
+      const dpr = Math.min(window.devicePixelRatio ?? 1, 2);
+      canvas.width = cw * dpr;
+      canvas.height = ch * dpr;
+      canvas.style.width = `${cw}px`;
+      canvas.style.height = `${ch}px`;
+      const ctx2 = canvas.getContext('2d')!;
+      // Scale arena to cover full screen — centered, clips overflow
+      const scale = Math.max(cw / ARENA_W, ch / ARENA_H) * dpr;
+      const offsetX = (cw * dpr - ARENA_W * scale) / 2;
+      const offsetY = (ch * dpr - ARENA_H * scale) / 2;
+      ctx2.setTransform(scale, 0, 0, scale, offsetX, offsetY);
     };
     resize();
     const ro = new ResizeObserver(resize);
@@ -256,8 +253,6 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
           ref={canvasRef}
           style={{
             imageRendering: 'auto',
-            borderRadius: '8px',
-            boxShadow: '0 8px 40px rgba(0,0,0,0.6)',
             touchAction: 'none',
           }}
         />

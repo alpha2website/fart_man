@@ -431,24 +431,16 @@ export class GameEngine {
         break;
       }
 
-      // ── SOLID BUILDING: side collision ──
-      // If player is inside the building body (below rooftop, above floor)
-      // push them up to the rooftop so they can't pass through
-      if (this.playerY + PLAYER_H > plat.topY + 8 && this.playerY < CH) {
-        // Player is below the rooftop surface and overlapping horizontally
-        // Push them up to stand on the rooftop
-        this.playerY  = plat.topY - PLAYER_H;
-        this.velY     = 0;
-        this.onGround = true;
-        if (!plat.scored) {
-          plat.scored = true;
-          this.score++;
-          if (this.score > this.bestScore) {
-            this.bestScore = this.score;
-            this.callbacks.onBestChange(this.bestScore);
-          }
-          this.callbacks.onScoreChange(this.score);
-        }
+      // ── Building collision when FLYING UP only ──
+      // If player is below the rooftop and moving upward (farting),
+      // they bounce off the building's underside — physics style.
+      // When falling (velY >= 0), player falls THROUGH the building
+      // into the gap — like a real person falling off a building.
+      if (this.velY < 0 && this.playerY > plat.topY && pFeet > plat.topY + 6) {
+        // Player is inside building body and flying upward → bounce off
+        this.playerY = plat.topY + 6;
+        this.velY = Math.abs(this.velY) * 0.4;  // bounce downward
+        this.particles.emit('fart_small', PLAYER_X, this.playerY, 3);
         break;
       }
     }

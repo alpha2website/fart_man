@@ -253,8 +253,9 @@ export class MultiplayerEngine {
         this.countdownTimer = 0;
         this.countdown--;
         this.audio.playFartSFX();
+        // Broadcast countdown state to clients so they see it too
+        this._broadcastState();
       }
-      // Still update particles
       this.particles.update(dt);
       return;
     }
@@ -529,13 +530,20 @@ export class MultiplayerEngine {
       players: playerSnaps,
       projectiles: projSnaps,
       timeLeft: 0, alive: aliveCount,
-    });
+      countdown: this.countdown,
+    } as any);
   }
 
   // ── Client: receive state update ──
 
   applyState(msg: Extract<NetMessage, { t: 'state' }>): void {
     if (this.conn.isHost) return;  // host already has the state
+
+    // Sync countdown from host
+    const cd = (msg as any).countdown;
+    if (typeof cd === 'number') {
+      this.countdown = cd;
+    }
 
     // Update players
     msg.players.forEach(snap => {
