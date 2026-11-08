@@ -795,4 +795,9 @@ export class MultiplayerEngine {
 
   get isMatchOver(): boolean { return this.matchOver; }
   get countdownVal(): number { return this.countdown; }
+
+  getFacing(): number {
+    const myPlayer = this.players.get(this.conn.slot);
+    return myPlayer?.facing ?? 1;
+  }
 }
