@@ -82,7 +82,10 @@ const WALLS: Wall[] = [
   { x: 420, y: 220, w: 60, h: 100 },
 ];
 
-// ── Spawn positions — well inside the 4 open corners + centre ──
+// ── Pre-computed wall fill color (no per-frame gradient creation) ──
+const WALL_COLOR = '#2E4060';
+const WALL_HIGHLIGHT = 'rgba(255,255,255,0.12)';
+const WALL_BORDER = 'rgba(96,165,250,0.3)';
 const SPAWNS = [
   { x: 80,  y: 80  },   // top-left corner
   { x: 820, y: 80  },   // top-right corner
@@ -275,9 +278,18 @@ export class MultiplayerEngine {
     this.lastTime   = ts;
     this.frameTime += dt;
 
-    if (this.conn.isHost) this._hostUpdate(dt);
+    if (this.conn.isHost) {
+      // Host: run physics every frame (60fps)
+      this._hostUpdate(dt);
+      this._render();
+    } else {
+      // Client: only render at ~30fps to save mobile CPU
+      // Physics runs on host — clients just interpolate received state
+      if (dt >= 16) {
+        this._render();
+      }
+    }
 
-    this._render();
     this.frameId = requestAnimationFrame(t => this._loop(t));
   }
 
@@ -427,8 +439,7 @@ export class MultiplayerEngine {
     }
 
     this.particles.update(dt);
-    if (this.shake > 0) this.shake = Math.max(0, this.shake - dtN);
-    this.elimFeed.forEach(e => e.alpha -= 0.006 * dtN);
+    if (this.shake > 0) this.shake = Math.max(0, this.shake - dtN);    this.elimFeed.forEach(e => e.alpha -= 0.006 * dtN);
     this.elimFeed = this.elimFeed.filter(e => e.alpha > 0);
 
     // Win check
@@ -501,16 +512,23 @@ export class MultiplayerEngine {
   }
 
   private _broadcastState(): void {
+    // NOTE: faceDataUrl intentionally excluded — clients got it at initMatch.
+    // Excluding it halves the payload size on every state update.
     const snaps = [...this.players.values()].map(p => ({
-      slot: p.slot, x: p.x, y: p.y, vx: p.vx, vy: p.vy,
-      hp: p.hp, maxHp: MAX_HP, alive: p.alive, facing: p.facing,
-      name: p.name, skinId: p.skinId, faceDataUrl: p.faceDataUrl,
-      attackCool: p.attackCool, specialCool: p.specialCool,
-      invuln: p.invuln, hitFlash: p.hitFlash, isHost: p.isHost,
+      slot: p.slot, x: Math.round(p.x), y: Math.round(p.y),
+      hp: Math.round(p.hp), alive: p.alive, facing: p.facing,
+      name: p.name, skinId: p.skinId,
+      attackCool: Math.round(p.attackCool),
+      specialCool: Math.round(p.specialCool),
+      invuln: Math.round(p.invuln), hitFlash: Math.round(p.hitFlash),
+      isHost: p.isHost,
     }));
     const projSnaps = this.projectiles.map(p => ({
-      id: p.id, x: p.x, y: p.y, vx: p.vx, vy: p.vy,
-      kind: p.kind, ownerId: p.ownerId, life: p.life, radius: p.radius,
+      id: p.id,
+      x: Math.round(p.x), y: Math.round(p.y),
+      vx: Math.round(p.vx * 10) / 10, vy: Math.round(p.vy * 10) / 10,
+      kind: p.kind, ownerId: p.ownerId,
+      life: Math.round(p.life), radius: p.radius,
     }));
     this.conn.broadcastState({
       t: 'state',
@@ -526,9 +544,58 @@ export class MultiplayerEngine {
 
   // ── Rendering (called every frame on all clients) ───────────
 
+  // Pre-cached background canvas drawn once, reused every frame
+  private _bgCache: HTMLCanvasElement | null = null;
+
+  private _buildBgCache(): void {
+    const bg = document.createElement('canvas');
+    bg.width  = ARENA_W;
+    bg.height = ARENA_H;
+    const ctx = bg.getContext('2d')!;
+
+    // Background gradient
+    const g = ctx.createLinearGradient(0, 0, 0, ARENA_H);
+    g.addColorStop(0,   '#131520');
+    g.addColorStop(0.5, '#1A1F35');
+    g.addColorStop(1,   '#0E1A30');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, ARENA_W, ARENA_H);
+
+    // Floor tile grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < ARENA_W; x += 60) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, ARENA_H); ctx.stroke();
+    }
+    for (let y = 0; y < ARENA_H; y += 60) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(ARENA_W, y); ctx.stroke();
+    }
+
+    // Arena border
+    ctx.strokeStyle = '#FDE047';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(2, 2, ARENA_W - 4, ARENA_H - 4);
+
+    // Maze walls — drawn once, flat fill
+    for (const w of WALLS) {
+      ctx.fillStyle = WALL_COLOR;
+      ctx.fillRect(w.x, w.y, w.w, w.h);
+      ctx.fillStyle = WALL_HIGHLIGHT;
+      ctx.fillRect(w.x, w.y, w.w, 3);
+      ctx.strokeStyle = WALL_BORDER;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(w.x + 0.5, w.y + 0.5, w.w - 1, w.h - 1);
+    }
+
+    this._bgCache = bg;
+  }
+
   private _render(): void {
     const { ctx } = this;
     const W = ARENA_W, H = ARENA_H;
+
+    // Build background cache once
+    if (!this._bgCache) this._buildBgCache();
 
     ctx.save();
     if (this.shake > 0) {
@@ -538,56 +605,8 @@ export class MultiplayerEngine {
       );
     }
 
-    // ── Background ──
-    const bg = ctx.createLinearGradient(0, 0, 0, H);
-    bg.addColorStop(0,   '#131520');
-    bg.addColorStop(0.5, '#1A1F35');
-    bg.addColorStop(1,   '#0E1A30');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, W, H);
-
-    // ── Floor tile grid ──
-    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-    ctx.lineWidth = 1;
-    for (let x = 0; x < W; x += 60) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-    }
-    for (let y = 0; y < H; y += 60) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-    }
-
-    // ── Arena border ──
-    ctx.strokeStyle = '#FDE047';
-    ctx.lineWidth = 3;
-    ctx.shadowColor = '#FDE047'; ctx.shadowBlur = 8;
-    ctx.strokeRect(2, 2, W - 4, H - 4);
-    ctx.shadowBlur = 0;
-
-    // ── Spawn zone halos ──
-    SPAWNS.forEach((s, i) => {
-      const alive = [...this.players.values()].filter(p => p.slot === i && p.alive);
-      if (alive.length === 0) return;
-      ctx.globalAlpha = 0.12;
-      ctx.fillStyle = '#FDE047';
-      ctx.beginPath(); ctx.arc(s.x, s.y, 55, 0, Math.PI * 2); ctx.fill();
-      ctx.globalAlpha = 1;
-    });
-
-    // ── Maze walls ──
-    for (const w of WALLS) {
-      const g = ctx.createLinearGradient(w.x, w.y, w.x + w.w, w.y + w.h);
-      g.addColorStop(0, '#354868');
-      g.addColorStop(1, '#253350');
-      ctx.fillStyle = g;
-      ctx.fillRect(w.x, w.y, w.w, w.h);
-      // Top highlight
-      ctx.fillStyle = 'rgba(255,255,255,0.14)';
-      ctx.fillRect(w.x, w.y, w.w, 3);
-      // Border glow
-      ctx.strokeStyle = 'rgba(96,165,250,0.35)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(w.x + 0.5, w.y + 0.5, w.w - 1, w.h - 1);
-    }
+    // ── Draw cached background (single drawImage call) ──
+    ctx.drawImage(this._bgCache!, 0, 0);
 
     // ── Particles ──
     this.particles.draw(ctx);
@@ -642,85 +661,32 @@ export class MultiplayerEngine {
   }
 
   private _drawProj(ctx: CanvasRenderingContext2D, proj: Projectile): void {
-    ctx.save();
-    const speed = Math.hypot(proj.vx, proj.vy);
+    // No shadow — flat colours only for mobile perf
     const angle = Math.atan2(proj.vy, proj.vx);
 
     if (proj.kind === 'blast') {
-      // Green fart blast circle
-      ctx.fillStyle = '#86EFAC';
-      ctx.shadowColor = '#22C55E'; ctx.shadowBlur = 10;
+      ctx.fillStyle = '#5EE898';
       ctx.beginPath(); ctx.arc(proj.x, proj.y, proj.radius, 0, Math.PI * 2); ctx.fill();
-
-      // Inner lighter spot
-      ctx.fillStyle = 'rgba(255,255,255,0.4)';
-      ctx.beginPath(); ctx.arc(proj.x - proj.radius * 0.3, proj.y - proj.radius * 0.3, proj.radius * 0.35, 0, Math.PI * 2); ctx.fill();
-
-      // Trail
-      ctx.globalAlpha = 0.3; ctx.fillStyle = '#86EFAC'; ctx.shadowBlur = 0;
-      ctx.beginPath();
-      ctx.ellipse(proj.x - proj.vx * 2.5, proj.y - proj.vy * 2.5, proj.radius * 0.7, proj.radius * 0.4, angle, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-
-      // ── Direction arrow ahead of the blast ──
-      ctx.shadowBlur = 0;
-      ctx.save();
-      ctx.translate(proj.x + proj.vx * 2.5, proj.y + proj.vy * 2.5);
-      ctx.rotate(angle);
-      ctx.fillStyle = 'rgba(134,239,172,0.85)';
-      ctx.beginPath();
-      ctx.moveTo(16, 0);
-      ctx.lineTo(4, -6);
-      ctx.lineTo(4,  6);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-
     } else {
-      // Purple gas bomb
-      const pulse = Math.sin(this.frameTime * 0.02) * 3;
-      ctx.fillStyle = '#C084FC';
-      ctx.shadowColor = '#A855F7'; ctx.shadowBlur = 14;
-      ctx.beginPath(); ctx.arc(proj.x, proj.y, proj.radius + pulse, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#A855F7';
+      ctx.beginPath(); ctx.arc(proj.x, proj.y, proj.radius, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#EC4899';
-      ctx.beginPath(); ctx.arc(proj.x, proj.y, proj.radius * 0.5, 0, Math.PI * 2); ctx.fill();
-
-      // Explosion range preview ring when near expiry
+      ctx.beginPath(); ctx.arc(proj.x, proj.y, proj.radius * 0.45, 0, Math.PI * 2); ctx.fill();
       if (proj.life < 20) {
-        ctx.strokeStyle = `rgba(239,68,68,${1 - proj.life / 20})`;
-        ctx.lineWidth = 2.5; ctx.shadowBlur = 0;
-        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = '#EF4444'; ctx.lineWidth = 2;
+        ctx.globalAlpha = 1 - proj.life / 20;
         ctx.beginPath(); ctx.arc(proj.x, proj.y, BOMB_R * (1 - proj.life / 20), 0, Math.PI * 2); ctx.stroke();
-        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
       }
-
-      // ── Direction arrow ──
-      ctx.shadowBlur = 0;
-      ctx.save();
-      ctx.translate(proj.x + proj.vx * 2.5, proj.y + proj.vy * 2.5);
-      ctx.rotate(angle);
-      ctx.fillStyle = 'rgba(192,132,252,0.9)';
-      ctx.beginPath();
-      ctx.moveTo(16, 0);
-      ctx.lineTo(4, -7);
-      ctx.lineTo(4,  7);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-
-      // Velocity line (shows trajectory)
-      ctx.strokeStyle = 'rgba(192,132,252,0.35)';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(proj.x, proj.y);
-      ctx.lineTo(proj.x + proj.vx * 8, proj.y + proj.vy * 8);
-      ctx.stroke();
-      ctx.setLineDash([]);
     }
-
-    ctx.shadowBlur = 0;
+    // Direction arrow
+    ctx.save();
+    ctx.translate(proj.x + proj.vx * 2, proj.y + proj.vy * 2);
+    ctx.rotate(angle);
+    ctx.fillStyle = proj.kind === 'blast' ? 'rgba(94,232,152,0.9)' : 'rgba(168,85,247,0.9)';
+    ctx.beginPath();
+    ctx.moveTo(14, 0); ctx.lineTo(3, -5); ctx.lineTo(3, 5);
+    ctx.closePath(); ctx.fill();
     ctx.restore();
   }
 
@@ -728,109 +694,84 @@ export class MultiplayerEngine {
     if (!p.alive) return;
     const skin = SKINS.find(s => s.id === p.skinId) ?? SKINS[0];
     const R = PLAYER_R;
+    const alpha = (p.invuln > 0 && Math.floor(p.invuln) % 4 < 2) ? 0.45 : 1;
 
     ctx.save();
     ctx.translate(p.x, p.y);
+    ctx.globalAlpha = alpha;
 
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.beginPath(); ctx.ellipse(0, R * 0.85, R * 0.65, 8, 0, 0, Math.PI * 2); ctx.fill();
+    // Hit flash — solid white outline instead of shadowBlur (much cheaper)
+    if (p.hitFlash > 0) {
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(0, 0, R * 0.72, 0, Math.PI * 2); ctx.fill();
+    }
 
-    // Invuln flicker
-    if (p.invuln > 0 && Math.floor(p.invuln) % 4 < 2) ctx.globalAlpha = 0.45;
-
-    // Hit flash glow
-    if (p.hitFlash > 0) { ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 22; }
-
-    // Cape (behind body)
+    // Cape (simple rect, no ellipse)
     ctx.fillStyle = skin.capeColor;
-    ctx.globalAlpha *= 0.88;
-    ctx.beginPath();
-    ctx.ellipse(-p.facing * R * 0.68, 0, R * 0.38, R * 0.58, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = p.invuln > 0 && Math.floor(p.invuln) % 4 < 2 ? 0.45 : 1;
+    const capeX = -p.facing * (R * 0.6 + 8);
+    ctx.fillRect(capeX, -R * 0.5, 16, R * 1.0);
 
-    // Body
+    // Body — simple rect (no roundRect)
     ctx.fillStyle = skin.suitColor;
-    ctx.beginPath(); ctx.roundRect(-R * 0.58, -R * 0.28, R * 1.16, R * 0.78, 10); ctx.fill();
+    ctx.fillRect(-R * 0.55, -R * 0.25, R * 1.1, R * 0.75);
 
     // Belt
     ctx.fillStyle = skin.beltColor;
-    ctx.fillRect(-R * 0.52, R * 0.18, R * 1.04, 6);
-    ctx.fillStyle = '#F59E0B';
-    ctx.beginPath(); ctx.roundRect(-7, R * 0.18, 14, 6, 2); ctx.fill();
-
-    // Chest emblem
-    ctx.fillStyle = 'rgba(255,255,255,0.22)';
-    ctx.beginPath(); ctx.arc(0, R * -0.02, 10, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.font = '10px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('💨', 0, R * -0.02);
+    ctx.fillRect(-R * 0.5, R * 0.2, R * 1.0, 6);
 
     // Head
     ctx.fillStyle = skin.bodyColor;
-    ctx.beginPath(); ctx.arc(0, -R * 0.52, R * 0.54, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, -R * 0.5, R * 0.52, 0, Math.PI * 2); ctx.fill();
 
     // Face
-    const faceR = R * 0.5;
-    const faceY = -R * 0.52;
+    const faceR = R * 0.48;
+    const faceY = -R * 0.5;
     if (p.faceImg?.complete && p.faceImg.naturalWidth > 0) {
       ctx.save();
       ctx.beginPath(); ctx.arc(0, faceY, faceR, 0, Math.PI * 2); ctx.clip();
       ctx.drawImage(p.faceImg, -faceR, faceY - faceR, faceR * 2, faceR * 2);
       ctx.restore();
-      ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(0, faceY, faceR, 0, Math.PI * 2); ctx.stroke();
     } else {
-      // Cartoon eyes
+      // Simple eyes (2 circles, no stroke)
       const ex = 6 * p.facing;
       ctx.fillStyle = '#fff';
       ctx.beginPath(); ctx.arc(-ex, faceY - 3, 5, 0, Math.PI * 2); ctx.fill();
       ctx.beginPath(); ctx.arc( ex, faceY - 3, 5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#1a1a1a';
-      ctx.beginPath(); ctx.arc(-ex + p.facing * 1.5, faceY - 3, 2.5, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.arc( ex + p.facing * 1.5, faceY - 3, 2.5, 0, Math.PI * 2); ctx.fill();
-      // Smile
-      ctx.strokeStyle = '#5D3A1A'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(0, faceY + 5, 5, 0, Math.PI); ctx.stroke();
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(-ex + p.facing, faceY - 3, 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc( ex + p.facing, faceY - 3, 2.5, 0, Math.PI * 2); ctx.fill();
     }
 
     // Mask
     ctx.fillStyle = '#DC2626';
-    ctx.beginPath(); ctx.roundRect(-R * 0.4, faceY - 7, R * 0.8, 7, 3); ctx.fill();
+    ctx.fillRect(-R * 0.38, faceY - 8, R * 0.76, 7);
 
-    ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+    ctx.globalAlpha = 1;
     ctx.restore();
 
-    // ── Health bar (above player, large and clear) ──
-    const bw = 80, bh = 11;
-    const bx = p.x - bw / 2, by = p.y - R - 24;
-    ctx.fillStyle = 'rgba(0,0,0,0.75)';
-    ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
-    ctx.fillStyle = '#111';
+    // ── Health bar ──
+    const bw = 70, bh = 10;
+    const bx = p.x - bw / 2, by = p.y - R - 22;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
+    ctx.fillStyle = '#333';
     ctx.fillRect(bx, by, bw, bh);
     const hpPct = Math.max(0, p.hp / MAX_HP);
     ctx.fillStyle = hpPct > 0.55 ? '#22C55E' : hpPct > 0.3 ? '#FBBF24' : '#EF4444';
     ctx.fillRect(bx, by, bw * hpPct, bh);
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
-    ctx.strokeRect(bx, by, bw, bh);
-    // HP number
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 9px Arial';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(`${Math.ceil(p.hp)}`, p.x, by + bh / 2);
-    // Name
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 13px Arial';
+    // Name above bar
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 12px Arial';
     ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.fillText(p.name, p.x, by - 3);
+    ctx.fillText(p.name, p.x, by - 2);
     // Slot tag
-    ctx.fillStyle = '#FDE047'; ctx.font = 'bold 10px Arial';
-    ctx.fillText(`P${p.slot + 1}`, p.x, by - 16);
-    // Special ring
+    ctx.fillStyle = '#FDE047'; ctx.font = 'bold 9px Arial';
+    ctx.fillText(`P${p.slot + 1}`, p.x, by - 14);
+    // Special cooldown ring — only when active
     if (p.specialCool > 0) {
       const pct = p.specialCool / SPECIAL_CD;
-      ctx.strokeStyle = 'rgba(192,132,252,0.65)'; ctx.lineWidth = 3;
+      ctx.strokeStyle = '#A855F7'; ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, R + 7, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - pct));
+      ctx.arc(p.x, p.y, R + 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - pct));
       ctx.stroke();
     }
   }
