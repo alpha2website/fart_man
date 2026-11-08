@@ -16,7 +16,7 @@ const ARENA_H = 540;
 
 // Player is 36px radius so corridors of 100px are comfortable to walk through
 const PLAYER_R   = 36;
-const MOVE_SPEED = 4.0;
+const MOVE_SPEED = 3.2;   // slightly reduced so mobile feels smoother
 const MAX_HP     = 100;
 
 // Weapons
@@ -284,7 +284,8 @@ export class MultiplayerEngine {
   // ── Host simulation ──────────────────────────────────────────
 
   private _hostUpdate(dt: number): void {
-    const dtN = dt / 16.667;
+    // Cap dtN at 1.5 (= 25ms frame) so slow mobile frames don't cause huge jumps
+    const dtN = Math.min(dt / 16.667, 1.5);
 
     // ── Countdown ──
     if (this.countdown > 0) {

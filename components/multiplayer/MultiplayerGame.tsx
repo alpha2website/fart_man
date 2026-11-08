@@ -24,17 +24,21 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
   const [matchOver,   setMatchOver]   = useState(false);
   const [winnerName,  setWinnerName]  = useState('');
   // Default to showing controls — hide them for desktop after mount
-  const [isMobile,    setIsMobile]    = useState(true);
-  // Visual joystick knob position (0..1 range, displayed as CSS px)
-  const [joyKnob,     setJoyKnob]     = useState({ x: 0, y: 0 });
+  const [isMobile, setIsMobile] = useState(true);
+
+  // Joystick knob visual — use a DOM ref to avoid React re-render on every touchmove
+  const knobRef = useRef<HTMLDivElement>(null);
 
   // ── Input refs ────────────────────────────────────────────
-  const keysRef      = useRef<Record<string, boolean>>({});
-  const attackHeld   = useRef(false);
-  const specialHeld  = useRef(false);
-  const joyRef       = useRef({ active: false, cx: 0, cy: 0, dx: 0, dy: 0 });
-  const facingRef    = useRef<1 | -1>(1);
-  const lastInputRef = useRef('');   // serialised last-sent input — skip if unchanged
+  const keysRef     = useRef<Record<string, boolean>>({});
+  const attackHeld  = useRef(false);
+  const specialHeld = useRef(false);
+  const joyRef      = useRef({ active: false, cx: 0, cy: 0, dx: 0, dy: 0 });
+  const facingRef   = useRef<1 | -1>(1);
+  const lastSerial  = useRef('');
+
+  // Dead zone: ignore joystick movement smaller than this fraction of maxR
+  const DEAD_ZONE = 0.18;
 
   const flush = useCallback(() => {
     let mx = 0, my = 0;
@@ -45,27 +49,35 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     if (k.s || k.arrowdown)  my += 1;
 
     if (joyRef.current.active) {
-      mx = joyRef.current.dx;
-      my = joyRef.current.dy;
+      const rawX = joyRef.current.dx;
+      const rawY = joyRef.current.dy;
+      const mag  = Math.hypot(rawX, rawY);
+      // Apply dead zone: if magnitude < threshold, treat as zero
+      if (mag > DEAD_ZONE) {
+        // Rescale so dead zone edge = 0, outer edge = 1 (smooth gradient)
+        const scaled = (mag - DEAD_ZONE) / (1 - DEAD_ZONE);
+        mx = (rawX / mag) * scaled;
+        my = (rawY / mag) * scaled;
+      }
     }
 
     const len = Math.hypot(mx, my);
     if (len > 1) { mx /= len; my /= len; }
-    if (mx !== 0) facingRef.current = mx > 0 ? 1 : -1;
+    if (mx > 0.1) facingRef.current = 1;
+    else if (mx < -0.1) facingRef.current = -1;
 
     const inp: InputState = {
-      moveX:   Math.round(mx * 100) / 100,   // 2dp to reduce noise
+      moveX:   Math.round(mx * 100) / 100,
       moveY:   Math.round(my * 100) / 100,
       facing:  facingRef.current,
       attack:  attackHeld.current,
       special: specialHeld.current,
     };
 
-    // Only send if something actually changed — reduces mobile MQTT flood
+    // Skip send if nothing changed
     const serial = `${inp.moveX},${inp.moveY},${inp.facing},${inp.attack},${inp.special}`;
-    if (serial === lastInputRef.current) return;
-    lastInputRef.current = serial;
-
+    if (serial === lastSerial.current) return;
+    lastSerial.current = serial;
     engineRef.current?.setLocalInput(inp);
   }, []);
 
@@ -201,31 +213,40 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
   }, []);
 
   // ── Touch controls ────────────────────────────────────────
-  // Joystick — use the touch start position as the joystick centre
+  const MAX_R = 48; // joystick radius in px
+
+  // Move knob directly via DOM — avoids React re-render on every touchmove
+  const setKnobPos = (x: number, y: number) => {
+    if (knobRef.current) {
+      knobRef.current.style.transform = `translate(${x}px, ${y}px)`;
+    }
+  };
+
   const onJoyStart = (e: React.TouchEvent) => {
     const t = e.touches[0];
     joyRef.current = { active: true, cx: t.clientX, cy: t.clientY, dx: 0, dy: 0 };
-    setJoyKnob({ x: 0, y: 0 });
+    setKnobPos(0, 0);
   };
   const onJoyMove = (e: React.TouchEvent) => {
     if (!joyRef.current.active) return;
     const t = e.touches[0];
-    const dx = t.clientX - joyRef.current.cx;
-    const dy = t.clientY - joyRef.current.cy;
-    const maxR = 48;
-    const len  = Math.hypot(dx, dy);
-    const cl   = len > maxR ? maxR / len : 1;
-    joyRef.current.dx = (dx * cl) / maxR;
-    joyRef.current.dy = (dy * cl) / maxR;
-    // Update knob visual position (capped at maxR px from centre)
-    const kx = dx * cl;
-    const ky = dy * cl;
-    setJoyKnob({ x: kx, y: ky });
+    const rawDx = t.clientX - joyRef.current.cx;
+    const rawDy = t.clientY - joyRef.current.cy;
+    const len   = Math.hypot(rawDx, rawDy);
+    // Clamp knob to MAX_R
+    const cl  = len > MAX_R ? MAX_R / len : 1;
+    const kx  = rawDx * cl;
+    const ky  = rawDy * cl;
+    // Store normalised (-1..1)
+    joyRef.current.dx = kx / MAX_R;
+    joyRef.current.dy = ky / MAX_R;
+    // Move knob visually (direct DOM — no React re-render)
+    setKnobPos(kx, ky);
     flush();
   };
   const onJoyEnd = () => {
     joyRef.current = { active: false, cx: 0, cy: 0, dx: 0, dy: 0 };
-    setJoyKnob({ x: 0, y: 0 });
+    setKnobPos(0, 0);
     flush();
   };
 
@@ -274,13 +295,11 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
             onTouchEnd={onJoyEnd}
             onTouchCancel={onJoyEnd}
           >
-            {/* Knob — moves with finger */}
+            {/* Knob — position updated via direct DOM ref, no React re-render */}
             <div
-              className="w-14 h-14 rounded-full bg-white/40 border-2 border-white/60 shadow-lg"
-              style={{
-                transform: `translate(${joyKnob.x}px, ${joyKnob.y}px)`,
-                transition: joyRef.current.active ? 'none' : 'transform 0.1s ease-out',
-              }}
+              ref={knobRef}
+              className="w-14 h-14 rounded-full bg-white/50 border-2 border-white/80 shadow-lg"
+              style={{ transition: 'transform 0.08s ease-out', willChange: 'transform' }}
             />
           </div>
 
