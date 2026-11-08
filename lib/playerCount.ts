@@ -43,8 +43,17 @@ export class PlayerCountTracker {
     if (typeof window === 'undefined') { this.myId = genId(); return; }
     this.myId = getSessionId();
 
+    // Always initialize a base simulated count for realistic feel
+    this.simulatedCount = 3 + Math.floor(Math.random() * 5);
+
     if (typeof BroadcastChannel !== 'undefined') {
       this._initChannel();
+      // Also run a gentle simulated fluctuation for the "other players" base
+      this.simTimer = setInterval(() => {
+        const delta = Math.random() < 0.5 ? 1 : -1;
+        this.simulatedCount = Math.max(2, Math.min(12, this.simulatedCount + delta));
+        this._notify();
+      }, 10_000);
     } else {
       this._initSimulated();
     }
@@ -137,19 +146,26 @@ export class PlayerCountTracker {
   // ---- Simulated count (fallback — makes it feel alive) ----
 
   private _initSimulated(): void {
-    // Start with 1 (this tab) and gently fluctuate
-    this.simulatedCount = 1 + Math.floor(Math.random() * 4);
+    // Start with a lively count
+    this.simulatedCount = 3 + Math.floor(Math.random() * 6);
     this.simTimer = setInterval(() => {
       const delta = Math.random() < 0.5 ? 1 : -1;
-      this.simulatedCount = Math.max(1, Math.min(12, this.simulatedCount + delta));
+      this.simulatedCount = Math.max(2, Math.min(15, this.simulatedCount + delta));
       this._notify();
-    }, 12_000);
+    }, 8_000);
   }
 
   // ---- Helpers ----
 
   private _count(): number {
-    if (this.channel) return this.peers.size;
+    if (this.channel) {
+      // BroadcastChannel counts actual local tabs.
+      // Add a simulated "other players online" base so the count
+      // feels realistic even with just 1 tab open.
+      const localTabs = this.peers.size;
+      const base = this.simulatedCount || (3 + Math.floor(Math.random() * 5));
+      return localTabs + base;
+    }
     return this.simulatedCount;
   }
 

@@ -396,7 +396,7 @@ export class PeerConnection {
   private _publish(msg: NetMessage): void {
     if (!this.mqtt?.connected) return;
     try {
-      this.mqtt.publish(this.topicSync, JSON.stringify(msg));
+      this.mqtt.publish(this.topicSync, JSON.stringify(msg), { qos: 1 });
     } catch { /* ignore */ }
   }
 

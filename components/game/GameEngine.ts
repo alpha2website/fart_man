@@ -430,6 +430,27 @@ export class GameEngine {
         }
         break;
       }
+
+      // ── SOLID BUILDING: side collision ──
+      // If player is inside the building body (below rooftop, above floor)
+      // push them up to the rooftop so they can't pass through
+      if (this.playerY + PLAYER_H > plat.topY + 8 && this.playerY < CH) {
+        // Player is below the rooftop surface and overlapping horizontally
+        // Push them up to stand on the rooftop
+        this.playerY  = plat.topY - PLAYER_H;
+        this.velY     = 0;
+        this.onGround = true;
+        if (!plat.scored) {
+          plat.scored = true;
+          this.score++;
+          if (this.score > this.bestScore) {
+            this.bestScore = this.score;
+            this.callbacks.onBestChange(this.bestScore);
+          }
+          this.callbacks.onScoreChange(this.score);
+        }
+        break;
+      }
     }
 
     // ── Sync player draw position ──

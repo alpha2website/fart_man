@@ -14,7 +14,7 @@ import { AudioManager } from '@/components/game/AudioManager';
 
 const ARENA_W = 900;
 const ARENA_H = 560;
-const PLAYER_R = 28;
+const PLAYER_R = 40;          // enlarged for better visibility
 const MOVE_SPEED = 3.5;
 const MAX_HP = 100;
 
@@ -23,14 +23,55 @@ const ATTACK_CD = 350;
 const SPECIAL_CD = 3000;
 const PROJ_SPEED = 7;
 const PROJ_DMG = 12;
-const PROJ_LIFE = 80;     // frames
-const PROJ_R = 12;
-const BOMB_LIFE = 50;     // frames (~0.8s)
-const BOMB_R = 60;        // explosion radius
+const PROJ_LIFE = 80;
+const PROJ_R = 14;
+const BOMB_LIFE = 50;
+const BOMB_R = 70;            // bigger explosion
 const BOMB_DMG = 25;
 const DASH_SPEED = 12;
-const DASH_LIFE = 12;     // frames
+const DASH_LIFE = 12;
 const DASH_DMG = 18;
+
+// ── Pentagon maze walls ──
+// Each wall is a rectangle {x, y, w, h}
+// The pentagon boundary is visual; walls create the maze inside
+
+interface MazeWall { x: number; y: number; w: number; h: number; }
+
+// Pentagon corners (5 spawn points)
+const PENTAGON_CORNERS = [
+  { x: 450, y: 80 },    // top
+  { x: 760, y: 230 },   // top-right
+  { x: 640, y: 490 },   // bottom-right
+  { x: 260, y: 490 },   // bottom-left
+  { x: 140, y: 230 },   // top-left
+];
+
+// Pentagon vertices for drawing
+const PENTAGON_VERTICES = PENTAGON_CORNERS.map(c => ({ x: c.x, y: c.y }));
+
+// Maze walls — create corridors between the 5 corners
+const MAZE_WALLS: MazeWall[] = [
+  // Central pentagon ring (inner walls)
+  { x: 370, y: 220, w: 160, h: 16 },  // top inner wall
+  { x: 530, y: 250, w: 16, h: 100 },  // right inner wall
+  { x: 430, y: 340, w: 120, h: 16 },  // bottom inner wall
+  { x: 354, y: 250, w: 16, h: 100 },  // left inner wall
+
+  // Corridor walls — create paths between corners
+  { x: 200, y: 140, w: 140, h: 16 },  // top-left corridor
+  { x: 560, y: 140, w: 140, h: 16 },  // top-right corridor
+  { x: 180, y: 360, w: 100, h: 16 },  // bottom-left corridor
+  { x: 620, y: 360, w: 100, h: 16 },  // bottom-right corridor
+  { x: 430, y: 100, w: 16, h: 80 },   // top vertical corridor
+  { x: 100, y: 250, w: 16, h: 100 },  // left vertical
+  { x: 780, y: 250, w: 16, h: 100 },  // right vertical
+
+  // Small obstacles in open areas
+  { x: 280, y: 280, w: 80, h: 16 },
+  { x: 540, y: 280, w: 80, h: 16 },
+  { x: 440, y: 420, w: 16, h: 50 },
+];
 
 // ── Types ──
 
@@ -127,14 +168,8 @@ export class MultiplayerEngine {
     this.countdown = 3;
     this.countdownTimer = 0;
 
-    // Spawn positions around the arena
-    const positions = [
-      { x: 150, y: 150 },
-      { x: ARENA_W - 150, y: 150 },
-      { x: 150, y: ARENA_H - 150 },
-      { x: ARENA_W - 150, y: ARENA_H - 150 },
-      { x: ARENA_W / 2, y: ARENA_H / 2 },
-    ];
+    // Spawn positions at pentagon corners
+    const positions = PENTAGON_CORNERS;
 
     playerInfos.forEach((info, i) => {
       const pos = positions[i % positions.length];
@@ -269,6 +304,23 @@ export class MultiplayerEngine {
       p.x = clamp(p.x, PLAYER_R, ARENA_W - PLAYER_R);
       p.y = clamp(p.y, PLAYER_R, ARENA_H - PLAYER_R);
 
+      // ── Wall collision — push player out of maze walls ──
+      for (const wall of MAZE_WALLS) {
+        const nearestX = clamp(p.x, wall.x, wall.x + wall.w);
+        const nearestY = clamp(p.y, wall.y, wall.y + wall.h);
+        const dx = p.x - nearestX;
+        const dy = p.y - nearestY;
+        const dist = Math.hypot(dx, dy);
+        if (dist < PLAYER_R && dist > 0) {
+          const push = PLAYER_R - dist;
+          p.x += (dx / dist) * push;
+          p.y += (dy / dist) * push;
+        } else if (dist === 0) {
+          // Player center is inside the wall — push up
+          p.y = wall.y - PLAYER_R;
+        }
+      }
+
       // Cooldowns
       p.attackCool = Math.max(0, p.attackCool - dt);
       p.specialCool = Math.max(0, p.specialCool - dt);
@@ -321,6 +373,20 @@ export class MultiplayerEngine {
       proj.y += proj.vy * dtN;
       proj.life -= dtN;
 
+      // ── Projectile vs wall collision ──
+      let hitWall = false;
+      for (const wall of MAZE_WALLS) {
+        const nearestX = clamp(proj.x, wall.x, wall.x + wall.w);
+        const nearestY = clamp(proj.y, wall.y, wall.y + wall.h);
+        if (Math.hypot(proj.x - nearestX, proj.y - nearestY) < proj.radius) {
+          if (proj.kind === 'bomb') {
+            this._explodeBomb(proj);
+          }
+          hitWall = true;
+          break;
+        }
+      }
+
       // Bomb explosion
       if (proj.kind === 'bomb' && proj.life <= 0) {
         this._explodeBomb(proj);
@@ -345,8 +411,8 @@ export class MultiplayerEngine {
         }
       });
 
-      // Out of bounds or expired
-      if (hit || proj.life <= 0 || proj.x < -20 || proj.x > ARENA_W + 20 || proj.y < -20 || proj.y > ARENA_H + 20) {
+      // Out of bounds or expired or hit wall
+      if (hitWall || hit || proj.life <= 0 || proj.x < -20 || proj.x > ARENA_W + 20 || proj.y < -20 || proj.y > ARENA_H + 20) {
         this.projectiles.splice(i, 1);
       }
     }
@@ -526,24 +592,57 @@ export class MultiplayerEngine {
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, W, H);
 
-    // Arena floor grid
-    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-    ctx.lineWidth = 1;
-    for (let x = 0; x < W; x += 60) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-    }
-    for (let y = 0; y < H; y += 60) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-    }
-
-    // Arena border
+    // ── Pentagon boundary ──
+    ctx.beginPath();
+    PENTAGON_VERTICES.forEach((v, i) => {
+      if (i === 0) ctx.moveTo(v.x, v.y);
+      else ctx.lineTo(v.x, v.y);
+    });
+    ctx.closePath();
+    // Fill pentagon area with darker shade
+    ctx.fillStyle = 'rgba(15,20,40,0.5)';
+    ctx.fill();
+    // Pentagon border — glowing yellow
     ctx.strokeStyle = '#FDE047';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(2, 2, W - 4, H - 4);
+    ctx.lineWidth = 4;
+    ctx.shadowColor = '#FDE047';
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // ── Pentagon corner spawn markers ──
+    PENTAGON_CORNERS.forEach((c, i) => {
+      ctx.strokeStyle = 'rgba(253,224,71,0.3)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 50, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(253,224,71,0.15)';
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 50, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // ── Maze walls ──
+    MAZE_WALLS.forEach(wall => {
+      // Wall body
+      const grad = ctx.createLinearGradient(wall.x, wall.y, wall.x, wall.y + wall.h);
+      grad.addColorStop(0, '#3B4D6B');
+      grad.addColorStop(1, '#2A3850');
+      ctx.fillStyle = grad;
+      ctx.fillRect(wall.x, wall.y, wall.w, wall.h);
+      // Wall highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.1)';
+      ctx.fillRect(wall.x, wall.y, wall.w, 2);
+      // Wall border
+      ctx.strokeStyle = 'rgba(253,224,71,0.2)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(wall.x, wall.y, wall.w, wall.h);
+    });
 
     // Center decoration
     ctx.fillStyle = 'rgba(253,224,71,0.06)';
-    ctx.font = 'bold 72px Arial';
+    ctx.font = 'bold 48px Arial';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('💨', W / 2, H / 2);
@@ -700,23 +799,42 @@ export class MultiplayerEngine {
 
     ctx.restore();
 
-    // Health bar
-    const barW = 50, barH = 6;
-    const barX = p.x - barW / 2, barY = p.y - PLAYER_R - 14;
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+    // ── Health bar — enlarged and clearly visible ──
+    const barW = 80, barH = 10;
+    const barX = p.x - barW / 2, barY = p.y - PLAYER_R - 22;
+
+    // Background
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(barX - 2, barY - 2, barW + 4, barH + 4);
+
+    // Empty bar
     ctx.fillStyle = '#1a1a1a';
     ctx.fillRect(barX, barY, barW, barH);
+
+    // HP fill
     const hpPct = p.hp / MAX_HP;
-    ctx.fillStyle = hpPct > 0.5 ? '#22C55E' : hpPct > 0.25 ? '#FBBF24' : '#EF4444';
+    const hpColor = hpPct > 0.5 ? '#22C55E' : hpPct > 0.25 ? '#FBBF24' : '#EF4444';
+    ctx.fillStyle = hpColor;
     ctx.fillRect(barX, barY, barW * hpPct, barH);
+
+    // HP bar border
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, barY, barW, barH);
+
+    // HP number
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 10px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${Math.ceil(p.hp)}`, p.x, barY + barH / 2);
 
     // Name
     ctx.fillStyle = '#fff';
-    ctx.font = 'bold 11px Arial';
+    ctx.font = 'bold 13px Arial';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
-    ctx.fillText(p.name, p.x, barY - 2);
+    ctx.fillText(p.name, p.x, barY - 3);
 
     // Slot number
     ctx.fillStyle = '#FDE047';

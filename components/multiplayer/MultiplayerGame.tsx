@@ -32,8 +32,10 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     active: false, cx: 0, cy: 0, dx: 0, dy: 0,
   });
 
-  // Input state
+  // Input state — attackHeld/specialHeld track button hold state
   const inputRef = useRef({ moveX: 0, moveY: 0, facing: 1, attack: false, special: false });
+  const attackHeld = useRef(false);
+  const specialHeld = useRef(false);
 
   const updateInput = useCallback(() => {
     let mx = 0, my = 0;
@@ -56,19 +58,16 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
 
     const facing = mx !== 0 ? (mx > 0 ? 1 : -1) : inputRef.current.facing;
 
+    // Attack fires while button is held (respecting cooldown in engine)
     inputRef.current = {
       moveX: mx,
       moveY: my,
       facing,
-      attack: inputRef.current.attack,
-      special: inputRef.current.special,
+      attack: attackHeld.current,
+      special: specialHeld.current,
     };
 
     engineRef.current?.setLocalInput(inputRef.current);
-
-    // Reset transient flags
-    inputRef.current.attack = false;
-    inputRef.current.special = false;
   }, []);
 
   // Keyboard state
@@ -80,11 +79,11 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
       if (['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','shift'].includes(k)) {
         e.preventDefault();
       }
-      if (k === ' ') inputRef.current.attack = down ? true : inputRef.current.attack;
-      if (k === 'shift') inputRef.current.special = down ? true : inputRef.current.special;
+      if (k === ' ') attackHeld.current = down;
+      if (k === 'shift') specialHeld.current = down;
       if (['w','a','s','d'].includes(k)) keysRef.current[k] = down;
       if (['arrowup','arrowdown','arrowleft','arrowright'].includes(k)) keysRef.current[k] = down;
-      if (down) updateInput();
+      updateInput();
     };
 
     const kd = (e: KeyboardEvent) => onKey(e, true);
@@ -97,14 +96,10 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     };
   }, [updateInput]);
 
-  // Continuous input update
+  // Continuous input update — sends held button state every frame
   useEffect(() => {
     const interval = setInterval(() => {
-      // Re-send current input every frame even without key changes
-      const len = Math.hypot(inputRef.current.moveX, inputRef.current.moveY);
-      if (len > 0.01 || inputRef.current.attack || inputRef.current.special) {
-        updateInput();
-      }
+      updateInput();
     }, 50);
     return () => clearInterval(interval);
   }, [updateInput]);
@@ -198,16 +193,14 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
   }, [connRef, audioRef]);
 
   // ── Touch controls (mobile joystick + buttons) ──
+  // No preventDefault — touchAction:'none' CSS handles scroll prevention
 
-  const handleTouchStart = (e: React.TouchEvent, isAttack: boolean, isSpecial: boolean) => {
-    e.preventDefault();
-    if (isAttack) inputRef.current.attack = true;
-    if (isSpecial) inputRef.current.special = true;
-    updateInput();
-  };
+  const handleAttackStart = () => { attackHeld.current = true; updateInput(); };
+  const handleAttackEnd = () => { attackHeld.current = false; updateInput(); };
+  const handleSpecialStart = () => { specialHeld.current = true; updateInput(); };
+  const handleSpecialEnd = () => { specialHeld.current = false; updateInput(); };
 
   const handleJoyStart = (e: React.TouchEvent) => {
-    e.preventDefault();
     const t = e.touches[0];
     const rect = e.currentTarget.getBoundingClientRect();
     joyRef.current = {
@@ -219,7 +212,6 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
   };
 
   const handleJoyMove = (e: React.TouchEvent) => {
-    e.preventDefault();
     if (!joyRef.current.active) return;
     const t = e.touches[0];
     const dx = t.clientX - joyRef.current.cx;
@@ -232,8 +224,7 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     updateInput();
   };
 
-  const handleJoyEnd = (e: React.TouchEvent) => {
-    e.preventDefault();
+  const handleJoyEnd = () => {
     joyRef.current = { active: false, cx: 0, cy: 0, dx: 0, dy: 0 };
     updateInput();
   };
@@ -285,19 +276,23 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
               <div className="w-12 h-12 rounded-full bg-white/30 border-2 border-white/50" />
             </div>
 
-            {/* Attack button — bottom right */}
+            {/* Attack button — bottom right (hold to fire) */}
             <button
-              onTouchStart={(e) => handleTouchStart(e, true, false)}
-              className="absolute bottom-8 right-24 w-20 h-20 rounded-full bg-green-600/70 border-2 border-green-400 z-30 flex items-center justify-center text-2xl font-black text-white active:scale-90 transition-transform"
+              onTouchStart={handleAttackStart}
+              onTouchEnd={handleAttackEnd}
+              onTouchCancel={handleAttackEnd}
+              className="absolute bottom-8 right-24 w-24 h-24 rounded-full bg-green-600/70 border-2 border-green-400 z-30 flex items-center justify-center text-3xl font-black text-white active:scale-90 transition-transform"
               style={{ touchAction: 'none' }}
             >
               💨
             </button>
 
-            {/* Special button — bottom right */}
+            {/* Special button — bottom right (hold to fire) */}
             <button
-              onTouchStart={(e) => handleTouchStart(e, false, true)}
-              className="absolute bottom-8 right-6 w-16 h-16 rounded-full bg-purple-600/70 border-2 border-purple-400 z-30 flex items-center justify-center text-xl font-black text-white active:scale-90 transition-transform"
+              onTouchStart={handleSpecialStart}
+              onTouchEnd={handleSpecialEnd}
+              onTouchCancel={handleSpecialEnd}
+              className="absolute bottom-8 right-6 w-20 h-20 rounded-full bg-purple-600/70 border-2 border-purple-400 z-30 flex items-center justify-center text-2xl font-black text-white active:scale-90 transition-transform"
               style={{ touchAction: 'none' }}
             >
               💣
