@@ -55,46 +55,40 @@ interface Wall { x: number; y: number; w: number; h: number; }
 
 const W20 = 20;  // wall thickness
 
+// ── Gap analysis for PLAYER_R=36 (diameter=72px):
+//    Every corridor gap must be > 72px to walk through.
+//    All gaps here are >= 110px.
 const WALLS: Wall[] = [
-  // ── Top horizontal band (y=130..150) — two segments with gap in middle ──
-  { x: 180, y: 130, w: 200, h: W20 },
-  { x: 520, y: 130, w: 200, h: W20 },
+  // ── Top horizontal walls — gap in centre (380-520 = 140px gap) ──
+  { x: 160, y: 140, w: 220, h: W20 },   // top-left segment
+  { x: 520, y: 140, w: 220, h: W20 },   // top-right segment
 
-  // ── Bottom horizontal band (y=390..410) — two segments with gap in middle ──
-  { x: 180, y: 390, w: 200, h: W20 },
-  { x: 520, y: 390, w: 200, h: W20 },
+  // ── Bottom horizontal walls — same pattern ──
+  { x: 160, y: 380, w: 220, h: W20 },
+  { x: 520, y: 380, w: 220, h: W20 },
 
-  // ── Left vertical band (x=350..370) — two segments ──
-  { x: 350, y: 150, w: W20, h: 120 },
-  { x: 350, y: 270, w: W20, h: 120 },
+  // ── Left vertical wall — gap at y=270 (120px gap each side) ──
+  { x: 340, y: 160, w: W20, h: 100 },   // top piece ends at y=260
+  { x: 340, y: 280, w: W20, h: 100 },   // bottom piece starts at y=280
 
-  // ── Right vertical band (x=530..550) — two segments ──
-  { x: 530, y: 150, w: W20, h: 120 },
-  { x: 530, y: 270, w: W20, h: 120 },
+  // ── Right vertical wall — same ──
+  { x: 540, y: 160, w: W20, h: 100 },
+  { x: 540, y: 280, w: W20, h: 100 },
 
-  // ── Centre cross obstacles (adds cover in the open middle) ──
-  { x: 415, y: 215, w: 70,  h: W20 },   // centre horizontal
-  { x: 415, y: 305, w: 70,  h: W20 },   // centre horizontal 2
-  { x: 440, y: 235, w: W20, h: 70  },   // centre vertical
-
-  // ── Corner barricades (force players through corridors) ──
-  { x:  80, y:  80, w: 80, h: W20 },    // top-left
-  { x:  80, y:  80, w: W20, h: 80 },
-  { x: 740, y:  80, w: 80, h: W20 },    // top-right
-  { x: 800, y:  80, w: W20, h: 80 },
-  { x:  80, y: 440, w: 80, h: W20 },    // bottom-left
-  { x:  80, y: 360, w: W20, h: 80 },
-  { x: 740, y: 440, w: 80, h: W20 },    // bottom-right
-  { x: 800, y: 360, w: W20, h: 80 },
+  // ── Centre island — wide enough to hide behind, gaps on all sides ──
+  // Left side: x=340+20=360, right side: x=540 → gap is 540-360=180px ✓
+  // Top: y=140+20=160, bottom of island=300, top of bottom wall=380 → gap 80px
+  // So centre island sits at (420,220) 60×100
+  { x: 420, y: 220, w: 60, h: 100 },
 ];
 
-// ── Spawn positions — corners and centre guarantee separation ──
+// ── Spawn positions — well inside the 4 open corners + centre ──
 const SPAWNS = [
-  { x: 110, y: 110 },    // top-left
-  { x: 790, y: 110 },    // top-right
-  { x: 110, y: 430 },    // bottom-left
-  { x: 790, y: 430 },    // bottom-right
-  { x: 450, y: 270 },    // centre
+  { x: 80,  y: 80  },   // top-left corner
+  { x: 820, y: 80  },   // top-right corner
+  { x: 80,  y: 460 },   // bottom-left corner
+  { x: 820, y: 460 },   // bottom-right corner
+  { x: 450, y: 270 },   // centre
 ];
 
 // ─────────────────────────────────────────────────────────────
@@ -648,27 +642,83 @@ export class MultiplayerEngine {
 
   private _drawProj(ctx: CanvasRenderingContext2D, proj: Projectile): void {
     ctx.save();
+    const speed = Math.hypot(proj.vx, proj.vy);
+    const angle = Math.atan2(proj.vy, proj.vx);
+
     if (proj.kind === 'blast') {
+      // Green fart blast circle
       ctx.fillStyle = '#86EFAC';
       ctx.shadowColor = '#22C55E'; ctx.shadowBlur = 10;
       ctx.beginPath(); ctx.arc(proj.x, proj.y, proj.radius, 0, Math.PI * 2); ctx.fill();
+
+      // Inner lighter spot
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath(); ctx.arc(proj.x - proj.radius * 0.3, proj.y - proj.radius * 0.3, proj.radius * 0.35, 0, Math.PI * 2); ctx.fill();
+
       // Trail
-      ctx.globalAlpha = 0.35; ctx.fillStyle = '#86EFAC';
-      ctx.beginPath(); ctx.ellipse(proj.x - proj.vx * 2, proj.y, proj.radius * 0.7, proj.radius * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 0.3; ctx.fillStyle = '#86EFAC'; ctx.shadowBlur = 0;
+      ctx.beginPath();
+      ctx.ellipse(proj.x - proj.vx * 2.5, proj.y - proj.vy * 2.5, proj.radius * 0.7, proj.radius * 0.4, angle, 0, Math.PI * 2);
+      ctx.fill();
       ctx.globalAlpha = 1;
+
+      // ── Direction arrow ahead of the blast ──
+      ctx.shadowBlur = 0;
+      ctx.save();
+      ctx.translate(proj.x + proj.vx * 2.5, proj.y + proj.vy * 2.5);
+      ctx.rotate(angle);
+      ctx.fillStyle = 'rgba(134,239,172,0.85)';
+      ctx.beginPath();
+      ctx.moveTo(16, 0);
+      ctx.lineTo(4, -6);
+      ctx.lineTo(4,  6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
     } else {
+      // Purple gas bomb
       const pulse = Math.sin(this.frameTime * 0.02) * 3;
       ctx.fillStyle = '#C084FC';
       ctx.shadowColor = '#A855F7'; ctx.shadowBlur = 14;
       ctx.beginPath(); ctx.arc(proj.x, proj.y, proj.radius + pulse, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#EC4899';
       ctx.beginPath(); ctx.arc(proj.x, proj.y, proj.radius * 0.5, 0, Math.PI * 2); ctx.fill();
-      if (proj.life < 18) {
-        ctx.strokeStyle = `rgba(239,68,68,${1 - proj.life / 18})`;
-        ctx.lineWidth = 2; ctx.shadowBlur = 0;
-        ctx.beginPath(); ctx.arc(proj.x, proj.y, BOMB_R * (1 - proj.life / 18), 0, Math.PI * 2); ctx.stroke();
+
+      // Explosion range preview ring when near expiry
+      if (proj.life < 20) {
+        ctx.strokeStyle = `rgba(239,68,68,${1 - proj.life / 20})`;
+        ctx.lineWidth = 2.5; ctx.shadowBlur = 0;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.arc(proj.x, proj.y, BOMB_R * (1 - proj.life / 20), 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
       }
+
+      // ── Direction arrow ──
+      ctx.shadowBlur = 0;
+      ctx.save();
+      ctx.translate(proj.x + proj.vx * 2.5, proj.y + proj.vy * 2.5);
+      ctx.rotate(angle);
+      ctx.fillStyle = 'rgba(192,132,252,0.9)';
+      ctx.beginPath();
+      ctx.moveTo(16, 0);
+      ctx.lineTo(4, -7);
+      ctx.lineTo(4,  7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      // Velocity line (shows trajectory)
+      ctx.strokeStyle = 'rgba(192,132,252,0.35)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(proj.x, proj.y);
+      ctx.lineTo(proj.x + proj.vx * 8, proj.y + proj.vy * 8);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
+
     ctx.shadowBlur = 0;
     ctx.restore();
   }

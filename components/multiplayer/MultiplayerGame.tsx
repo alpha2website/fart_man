@@ -23,7 +23,8 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
   const engineRef  = useRef<MultiplayerEngine | null>(null);
   const [matchOver,   setMatchOver]   = useState(false);
   const [winnerName,  setWinnerName]  = useState('');
-  const [isMobile,    setIsMobile]    = useState(false);
+  // Default to showing controls — hide them for desktop after mount
+  const [isMobile,    setIsMobile]    = useState(true);
 
   // ── Input refs ────────────────────────────────────────────
   const keysRef      = useRef<Record<string, boolean>>({});
@@ -88,9 +89,12 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     return () => clearInterval(id);
   }, [flush]);
 
-  // ── Detect mobile ─────────────────────────────────────────
+  // ── Detect mobile — default true, hide for desktop after mount ─────────────────
   useEffect(() => {
-    setIsMobile('ontouchstart' in window || navigator.maxTouchPoints > 0);
+    // Only hide controls if user has a fine pointer (mouse) AND no touch
+    const hasTouch  = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    const hasMouse  = window.matchMedia('(pointer: fine)').matches;
+    setIsMobile(hasTouch || !hasMouse);
   }, []);
 
   // ── Canvas + engine setup ──────────────────────────────────
@@ -100,7 +104,7 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
     if (!canvas || !conn) return;
 
     // Size canvas to fill the container, preserving arena aspect ratio
-    // but allowing full-screen fill (cover mode)
+    // Simple approach: fit canvas inside screen (letterbox), no clipping
     const fit = () => {
       const parent = canvas.parentElement;
       if (!parent) return;
@@ -108,23 +112,32 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
       const ch = parent.clientHeight;
       const dpr = Math.min(window.devicePixelRatio ?? 1, 2);
 
-      // Cover: scale so the arena fills the container edge-to-edge
-      const scale    = Math.max(cw / ARENA_W, ch / ARENA_H);
-      const drawW    = Math.round(ARENA_W * scale);
-      const drawH    = Math.round(ARENA_H * scale);
+      // Fit (not cover) — arena always fully visible
+      const ar = ARENA_W / ARENA_H;
+      let drawW: number, drawH: number;
+      if (cw / ch > ar) {
+        drawH = ch;
+        drawW = Math.round(ch * ar);
+      } else {
+        drawW = cw;
+        drawH = Math.round(cw / ar);
+      }
 
-      canvas.style.width  = `${drawW}px`;
-      canvas.style.height = `${drawH}px`;
+      // Position canvas centred
+      canvas.style.width    = `${drawW}px`;
+      canvas.style.height   = `${drawH}px`;
       canvas.style.position = 'absolute';
-      canvas.style.left = `${Math.round((cw - drawW) / 2)}px`;
-      canvas.style.top  = `${Math.round((ch - drawH) / 2)}px`;
+      canvas.style.left     = `${Math.round((cw - drawW) / 2)}px`;
+      canvas.style.top      = `${Math.round((ch - drawH) / 2)}px`;
 
-      // Internal resolution
+      // Internal pixel buffer — reset clears transform so set it after
       canvas.width  = drawW * dpr;
       canvas.height = drawH * dpr;
 
-      const ctx = canvas.getContext('2d')!;
-      ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+      const ctx2 = canvas.getContext('2d')!;
+      // Scale from ARENA coords to screen pixels
+      const scale = (drawW / ARENA_W) * dpr;
+      ctx2.setTransform(scale, 0, 0, scale, 0, 0);
     };
 
     fit();
@@ -178,10 +191,11 @@ export default function MultiplayerGame({ connRef, audioRef, onExit }: Multiplay
   }, []);
 
   // ── Touch controls ────────────────────────────────────────
-  // Joystick
+  // Joystick — use the touch start position as the joystick centre
+  // so it works regardless of where the element is on screen
   const onJoyStart = (e: React.TouchEvent) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    joyRef.current = { active: true, cx: r.left + r.width / 2, cy: r.top + r.height / 2, dx: 0, dy: 0 };
+    const t = e.touches[0];
+    joyRef.current = { active: true, cx: t.clientX, cy: t.clientY, dx: 0, dy: 0 };
   };
   const onJoyMove = (e: React.TouchEvent) => {
     if (!joyRef.current.active) return;
